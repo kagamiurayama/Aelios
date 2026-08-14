@@ -1,4 +1,4 @@
-name = "companion-memory-proxy"
+name = "ashuo-companion-memory-proxy"
 main = "src/index.ts"
 compatibility_date = "2026-04-01"
 keep_vars = true
@@ -24,7 +24,7 @@ head_sampling_rate = 1
 
 [triggers]
 # Cloudflare cron uses UTC. 20:10 UTC is 04:10 in Singapore/China time.
-crons = ["10 20 * * *"]
+crons = ["10 22 * * *"]
 
 [ai]
 binding = "AI"
