@@ -23,6 +23,7 @@ import {
   fetchMemoryLifecycleRows,
   getDailyLog,
   getMemoryCandidateById,
+  HandAuthoredProtectedError,
   listGlossary,
   listMemoryCandidates,
   listPrecious,
@@ -757,6 +758,16 @@ async function createApprovedMemoryFromCandidate(
   return { id: created.id, action: "created" };
 }
 
+// E 轴保护撞到候选处置路径时，给 reviewer 一个可读的 409 而不是裸 500 (#33)。
+function handAuthoredConflict(error: unknown): Response | null {
+  if (!(error instanceof HandAuthoredProtectedError)) return null;
+  return openAiError(
+    "目标记忆是亲笔写入（E 轴保护），审核链只可提案、不可覆写。这条候选请选「丢弃」；确要更新原文，去重要记忆页亲手编辑或取代那条记忆。",
+    409,
+    "hand_authored_protected"
+  );
+}
+
 export async function handleMemoryCandidates(request: Request, env: Env): Promise<Response> {
   const auth = await authenticate(request, env);
   if (!auth.ok) return openAiError("Unauthorized", 401, "authentication_error");
@@ -821,19 +832,26 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
         target.status === "active" &&
         target.version_status !== "superseded";
       if (targetActive) {
-        const result = await supersedeMemory(env, {
-          namespace,
-          oldId: candidate.target_memory_id,
-          newContent: content,
-          newType: type,
-          newFactKey: factKey,
-          confidence,
-          importance,
-          tags,
-          source: "review",
-          sourceMessageIds,
-          reason: "approve_update"
-        });
+        let result;
+        try {
+          result = await supersedeMemory(env, {
+            namespace,
+            oldId: candidate.target_memory_id,
+            newContent: content,
+            newType: type,
+            newFactKey: factKey,
+            confidence,
+            importance,
+            tags,
+            source: "review",
+            sourceMessageIds,
+            reason: "approve_update"
+          });
+        } catch (error) {
+          const conflict = handAuthoredConflict(error);
+          if (conflict) return conflict;
+          throw error;
+        }
         const updated = await updateMemoryCandidateStatus(env.DB, {
           namespace,
           id,
@@ -855,18 +873,25 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
     const fallbackNote = candidate.target_memory_id
       ? `${readString(body.decision_note) || "approved"}; target_gone_fallback`
       : readString(body.decision_note) || "approved";
-    const approval = await createApprovedMemoryFromCandidate(env, {
-      namespace,
-      type,
-      content,
-      factKey,
-      confidence,
-      importance,
-      tags,
-      sourceMessageIds,
-      source: "review",
-      excludeIds: candidate.target_memory_id ? [candidate.target_memory_id] : undefined
-    });
+    let approval;
+    try {
+      approval = await createApprovedMemoryFromCandidate(env, {
+        namespace,
+        type,
+        content,
+        factKey,
+        confidence,
+        importance,
+        tags,
+        sourceMessageIds,
+        source: "review",
+        excludeIds: candidate.target_memory_id ? [candidate.target_memory_id] : undefined
+      });
+    } catch (error) {
+      const conflict = handAuthoredConflict(error);
+      if (conflict) return conflict;
+      throw error;
+    }
     const updated = await updateMemoryCandidateStatus(env.DB, {
       namespace,
       id,
@@ -926,19 +951,26 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
   if (action === "supersede") {
     const oldId = readString(body.target_id);
     if (!oldId) return openAiError("target_id is required", 400);
-    const result = await supersedeMemory(env, {
-      namespace,
-      oldId,
-      newContent: content,
-      newType: type,
-      newFactKey: factKey,
-      confidence,
-      importance,
-      tags,
-      source: "review",
-      sourceMessageIds,
-      reason: readString(body.decision_note) || "candidate_supersede"
-    });
+    let result;
+    try {
+      result = await supersedeMemory(env, {
+        namespace,
+        oldId,
+        newContent: content,
+        newType: type,
+        newFactKey: factKey,
+        confidence,
+        importance,
+        tags,
+        source: "review",
+        sourceMessageIds,
+        reason: readString(body.decision_note) || "candidate_supersede"
+      });
+    } catch (error) {
+      const conflict = handAuthoredConflict(error);
+      if (conflict) return conflict;
+      throw error;
+    }
     const updated = await updateMemoryCandidateStatus(env.DB, {
       namespace,
       id,

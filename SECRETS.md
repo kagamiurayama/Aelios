@@ -19,8 +19,8 @@ Cloudflare Worker 的「Variables and Secrets」面板里，**Variable** 是明�
 | `IM_API_KEY` | **Secret** | 第二把钥匙，IM bot 用（可选） |
 | `DEBUG_API_KEY` | **Secret** | 调试接口钥匙（可选） |
 | `CF_AIG_TOKEN` | **Secret** | AI Gateway 调用 token（接网关才需要） |
-| `CLOUDFLARE_API_TOKEN` | **Secret** | Cloudflare API Token，部署脚本用它建 D1/Vectorize/Queue |
-| `CLOUDFLARE_ACCOUNT_ID` | Variable | Cloudflare Account ID，不是密钥本身，可明文 |
+| `CLOUDFLARE_API_TOKEN` | **Secret** | 可选。仅维护工具（Vectorize 对账/清理）与网关模式的 Workers AI 转发需要；建库建索引由部署环境的 wrangler 凭证完成，不靠它 |
+| `CLOUDFLARE_ACCOUNT_ID` | Variable | 不用手填：部署时 setup 脚本从部署环境自动取了写进 [vars]，多账号等取不到的场景才需要手动补 |
 | `AI_GATEWAY_BASE_URL` | Variable | AI Gateway 地址，不是密钥，可明文 |
 | 其它带默认值的环境变量 | Variable | 可明文 |
 
@@ -33,15 +33,14 @@ Cloudflare Worker 的「Variables and Secrets」面板里，**Variable** 是明�
 1. Fork `wusaki0723/Aelios`，clone 到本地。
 2. 在 Cloudflare Dashboard 创建 Worker（或先空着，`deploy:cloudflare` 会自动建）。
 3. **Worker → Settings → Variables and Secrets**，点 `Add`：
-   - 类型选 **Secret**（红框警告：不要选成 Variable！），分别加入你需要的密钥：
-     - `CLOUDFLARE_API_TOKEN` —— 你的 Cloudflare API Token
-     - `CHATBOX_API_KEY` —— 自己编一个密码，如 `sk-my-aelios-key`
-     - 其它 `*_API_KEY` / `CF_AIG_TOKEN` 按你选的用法加
-   - 类型选 Variable 加上 `CLOUDFLARE_ACCOUNT_ID`（这个不是密钥）。
+   - 类型选 **Secret**（红框警告：不要选成 Variable！），加入你需要的密钥：
+     - `CHATBOX_API_KEY` —— 自己编一个密码，如 `sk-my-aelios-key`（唯一必填）
+     - 其它 `*_API_KEY` / `CF_AIG_TOKEN` / `CLOUDFLARE_API_TOKEN` 按你选的用法加（都是可选功能）
+   - 用到维护工具时，类型选 Variable 加上 `CLOUDFLARE_ACCOUNT_ID`（这个不是密钥）。
 4. 回到本地仓库跑：
    ```bash
    npm install
-   npm run deploy:cloudflare
+   npm run deploy
    ```
    setup 脚本会读 Dashboard 上的变量、建好 D1 / Vectorize / Queue，但**不会再把你的密钥写进 wrangler.toml**（这是 #9 修好以后的版本）。
 5. 部署完拿到 Worker 地址，去客户端填 base_url 和 API Key 就行。

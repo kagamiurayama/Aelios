@@ -237,8 +237,11 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
   <div class="star-layer star-layer-a"></div>
   <div class="star-layer star-layer-b"></div>
 </div>
-<div x-data="memoryAdmin()" x-init="init()" x-cloak class="app-shell min-h-dvh pb-24 md:pb-0">
-  <div class="mx-auto flex min-h-dvh w-full max-w-[1440px] md:px-4 md:py-4">
+<!-- 移动端外壳是 h-dvh 弹性列：内容区内部滚动、tab 栏走正常文档流钉底，
+     不再用 fixed bottom-0 对齐布局视口（地址栏未收起时会把栏顶出屏幕，#34）。
+     md 起还原为整页 body 滚动，桌面行为不变。 -->
+<div x-data="memoryAdmin()" x-init="init()" x-cloak class="app-shell flex h-dvh flex-col md:block md:h-auto md:min-h-dvh">
+  <div class="mx-auto flex min-h-0 w-full max-w-[1440px] flex-1 overflow-y-auto md:min-h-dvh md:flex-none md:overflow-visible md:px-4 md:py-4">
     <aside class="hidden w-64 shrink-0 flex-col gap-4 border-r border-zinc-800 px-3 py-3 md:flex">
       <div class="flex items-center gap-3 px-2 py-2">
         <div class="grid h-9 w-9 place-items-center rounded-2xl bg-coral text-sm font-semibold text-zinc-950">A</div>
@@ -963,7 +966,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
     </main>
   </div>
 
-  <nav class="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-800 bg-[#0a0a0b]/95 px-2 pb-[max(10px,env(safe-area-inset-bottom))] pt-2 backdrop-blur md:hidden">
+  <nav class="z-40 shrink-0 border-t border-zinc-800 bg-[#0a0a0b]/95 px-2 pb-[max(10px,env(safe-area-inset-bottom))] pt-2 backdrop-blur md:hidden">
     <div class="grid grid-cols-8 gap-0.5">
       <button type="button" @click="go('today')" class="tap grid place-items-center rounded-2xl text-[10px] transition duration-150 ease-in-out" :class="page === 'today' ? 'bg-zinc-900 text-coral' : 'text-zinc-400'"><i data-lucide="sun" class="h-5 w-5"></i><span>今日</span></button>
       <button type="button" @click="go('diary')" class="tap grid place-items-center rounded-2xl text-[10px] transition duration-150 ease-in-out" :class="page === 'diary' ? 'bg-zinc-900 text-coral' : 'text-zinc-400'"><i data-lucide="book-open" class="h-5 w-5"></i><span>日记</span></button>

@@ -38,7 +38,17 @@ Aelios 是一个跑在 Cloudflare 上的记忆服务。你的 AI 客户端（Cha
 - 换个客户端记忆就没了 → 记忆存在你自己的 Cloudflare 里，换客户端只改一个地址。
 - 想给 Claude Code / Codex 加记忆 → 它能当成 MCP 工具挂上去，跨设备随身。
 
-## 三步搞定
+## 一键部署（推荐）
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wusaki0723/Aelios)
+
+点按钮，登录 Cloudflare，它会替你做完所有事：把仓库复制到你的 GitHub、按配置建好 D1 / Vectorize / Queue、**在部署前弹表单让你把密钥一次填好**、接上 push 自动部署。
+
+表单里唯一必填的是 `CHATBOX_API_KEY`：自己编一个密码（比如 `sk-my-aelios`），以后客户端连 Aelios 就用它。其余全部可以留空，什么时候要用什么功能再回来补（见下文可选功能各节）。
+
+部署完你会拿到一个地址：`https://companion-memory-proxy.<你的子域>.workers.dev`，直接跳到「[接客户端](#3-接客户端)」。
+
+## 手动部署（想自己掌控每一步）
 
 ### 1. 部署
 
@@ -49,23 +59,23 @@ Aelios 是一个跑在 Cloudflare 上的记忆服务。你的 AI 客户端（Cha
    - Production branch: `main`
    - Root directory: `/`
    - **Build command:** `npm ci`
-   - **Deploy command:** `npm run deploy:cloudflare`
+   - **Deploy command:** `npm run deploy`
 
-> ⚠️ 必须是 `npm run deploy:cloudflare`，**不是** `npm run deploy`，**不是** `wrangler deploy`。这条命令会自动建好 D1 数据库 + Vectorize 向量库 + Queue 队列。用错命令数据库不会建。
+> `npm run deploy` 会自动建好 D1 数据库 + Vectorize 向量库 + Queue 队列并应用建表迁移（老文档里的 `npm run deploy:cloudflare` 还在，是同一条命令的别名）。不要用裸 `wrangler deploy`，那样资源不会建。
 
 不配任何模型 key、不配 AI Gateway，记忆召回和夜间 dream 也能跑（Workers AI 默认链路）。
 
 ### 2. 设一把钥匙
 
-部署完，去 Worker 的 Settings → Variables and Secrets 加三个：
+部署完，去 Worker 的 Settings → Variables and Secrets 加一个：
 
 | 变量名 | 类型 | 填什么 |
 |---|---|---|
-| `CLOUDFLARE_ACCOUNT_ID` | Variable | 你的 Cloudflare Account ID |
-| `CLOUDFLARE_API_TOKEN` | Secret | 你的 Cloudflare API Token |
 | `CHATBOX_API_KEY` | Secret | 自己编一个密码，比如 `sk-my-aelios` |
 
-> 名字里带 `KEY` / `TOKEN` 的必须选 **Secret**（加密、不进 git），不要选 Variable。详见 [SECRETS.md](./SECRETS.md)。
+就这一个必填。`CLOUDFLARE_ACCOUNT_ID` 不用你填——部署时 setup 脚本从部署环境自动取了写进变量。`CLOUDFLARE_API_TOKEN` 只有用到「维护工具」（Vectorize 对账清理）时才需要，日常记、召、夜间整理都用不到，用到那天再补。
+
+> 名字里带 `KEY` / `TOKEN` 的必须选 **Secret**（加密、不进 git），不要选 Variable。详见 [SECRETS.md](./SECRETS.md)。完整密钥清单（哪些必填哪些可选）见 [.dev.vars.example](./.dev.vars.example)。
 
 保存后重新部署。你会拿到一个地址：`https://companion-memory-proxy.<你的子域>.workers.dev`
 
@@ -119,13 +129,15 @@ https://<你的 Worker 地址>/admin
 
 ## 给 Claude Code / Codex 加记忆（可选）
 
-环境变量加 `MEMORY_MCP_API_KEY`，然后在客户端的 MCP 配置里填：
+不用新钥匙，直接在客户端的 MCP 配置里填：
 
 ```
-URL:    https://<你的 Worker 地址>/mcp?token=<MEMORY_MCP_API_KEY>
+URL:    https://<你的 Worker 地址>/mcp?token=<你的 CHATBOX_API_KEY>
 ```
 
 你的官方客户端就有跨设备随身记忆了。
+
+想给 MCP 一把独立钥匙的话，加一个 Secret `MEMORY_MCP_API_KEY` 换到 URL 里用。区别有两点：这把钥匙只有记忆读写权限（不能调聊天转发），且经它写入的记忆按「亲笔」记档（E 轴署名，夜间整理不会自动改写）。单人自用不折腾这个也完全没问题。
 
 如果你想让 Claude Code 每次发消息前自动召回长期记忆，并把对话批量写回 Aelios，可以使用仓库自带的 Claude Code Hook：
 
@@ -147,13 +159,13 @@ Hook 只需要你的 Aelios Worker 地址和 `CHATBOX_API_KEY`，不需要任何
 
 ## 零配置也能用
 
-默认链路不需要 AI Gateway、不需要第三方模型 key：embedding + reranker + dream（每天一次）都跑 Workers AI。部署时填好 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`CHATBOX_API_KEY` 就能记、能召、能夜间整理。
+默认链路不需要 AI Gateway、不需要第三方模型 key：embedding + reranker + dream（每天一次）都跑 Workers AI。部署时填好 `CHATBOX_API_KEY` 一个就能记、能召、能夜间整理。
 
 Workers AI 免费额度主要花在每日一次的 dream（默认 `gpt-oss-120b`）和偶尔的 reranker/embedding 上——**不再有每轮聊天的压缩模型**，额度压力小很多。真要换 `EMBEDDING_MODEL` 注意维度会变（需重建 Vectorize 索引，面板「更多 → 维护」里有工具）。
 
 ## 最容易踩的坑
 
-- 部署命令必须是 `npm run deploy:cloudflare`，别的会覆盖变量、不建库。
+- 部署命令用 `npm run deploy`（或老名字 `npm run deploy:cloudflare`，同一条命令），裸 `wrangler deploy` 不建库。
 - 重新部署变量不会丢（命令带 `--keep-vars`）。
 - Vectorize 索引 `memo-kb`（1024 维 cosine）别手动删。
 - 看图会切到 `VISION_MODEL`，留意它的价格。
@@ -350,9 +362,9 @@ hard delete: deleted/superseded/expired 超 30 天 → 先删 Vectorize 再删 D
 
 | 变量 | 说明 |
 |---|---|
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare Account ID |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（Secret） |
 | `CHATBOX_API_KEY` | 客户端 + 面板访问密钥（Secret） |
+
+`CLOUDFLARE_ACCOUNT_ID` 部署时由 setup 脚本自动写入；`CLOUDFLARE_API_TOKEN`（Secret）仅维护工具/网关模式 Workers AI 转发需要，均不在必填之列。
 
 ### 完整网关加填
 
@@ -427,7 +439,7 @@ hard delete: deleted/superseded/expired 超 30 天 → 先删 Vectorize 再删 D
 
 ```bash
 npm install
-npm run deploy:cloudflare   # 建库 + 升级 + 部署
+npm run deploy              # 建库 + 升级 + 部署（deploy:cloudflare 是它的旧别名）
 npm run worker:test         # 主测试套件（177 项）
 node scripts/verify-extract-pipeline.mjs   # 4h 抽取管线行为测试
 node scripts/verify-cache-strategy.mjs     # Claude 缓存断点策略（15 项）

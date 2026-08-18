@@ -97,6 +97,8 @@ queue = "ashuo-companion-memory"
 max_batch_size = 10
 max_batch_timeout = 30
 
+# 阿朔实例固定资源名与 database_id（资源已存在）。setup 脚本部署时会按
+# CMP_D1_NAME 等环境变量重写本节，见 bin/aelios_deploy.sh。
 [[vectorize]]
 binding = "VECTORIZE"
 index_name = "ashuo-memo-kb"

@@ -176,6 +176,54 @@ function ensureD1() {
 
 function ensureVectorize() {
   console.log(`\nEnsuring Vectorize index: ${vectorizeName}`);
+
+  // 维度闸：Deploy 按钮等外部流程可能已按默认参数预开了同名索引。
+  // 维度/度量不对的索引整个记忆管线都接不上，而且创建后改不了——
+  // 空的就删掉重建，有数据的只能人来决定，报清楚原因后拒绝继续。
+  const existing = run(["vectorize", "get", vectorizeName, "--json"], {
+    allowFailure: true,
+    capture: true
+  });
+  if (existing.status === 0) {
+    let config = null;
+    try {
+      config = JSON.parse(existing.stdout);
+    } catch {
+      // 输出不是 JSON（老版 wrangler 等），闸退化为原来的 create-if-missing 行为。
+    }
+    const dims = config?.config?.dimensions ?? config?.dimensions;
+    const metric = config?.config?.metric ?? config?.metric;
+    const mismatch =
+      (dims !== undefined && String(dims) !== String(vectorizeDimensions)) ||
+      (metric !== undefined && metric !== vectorizeMetric);
+    if (mismatch) {
+      const info = run(["vectorize", "info", vectorizeName, "--json"], {
+        allowFailure: true,
+        capture: true
+      });
+      let vectorCount = null;
+      try {
+        const parsed = JSON.parse(info.stdout);
+        vectorCount = parsed?.vectorCount ?? parsed?.vectorsCount ?? null;
+      } catch {
+        // 拿不到数量就当有数据，宁可停下也不误删。
+      }
+      if (vectorCount === 0) {
+        console.log(
+          `Vectorize index ${vectorizeName} has wrong config (dimensions=${dims}, metric=${metric}) but is empty; recreating with ${vectorizeDimensions}/${vectorizeMetric}`
+        );
+        run(["vectorize", "delete", vectorizeName, "--force"]);
+      } else {
+        throw new Error(
+          `Vectorize index "${vectorizeName}" exists with dimensions=${dims}, metric=${metric}, ` +
+            `but this app needs ${vectorizeDimensions}/${vectorizeMetric}. The index already holds data ` +
+            `(vectorCount=${vectorCount ?? "unknown"}), so it will not be deleted automatically. ` +
+            `Delete it yourself (wrangler vectorize delete ${vectorizeName}) or set CMP_VECTORIZE_NAME to use a different index, then redeploy.`
+        );
+      }
+    }
+  }
+
   run(
     [
       "vectorize",
@@ -261,7 +309,33 @@ function ensureVisibleVars() {
   }
 }
 
+// CLOUDFLARE_ACCOUNT_ID 不该让人手填：Workers Builds 构建环境本来就带着它，
+// 本地部署时 wrangler 登录态里也有。部署时自动写进 [vars]，
+// 运行时要用它的功能（Vectorize 对账等维护工具）就直接可用。
+function detectAccountId() {
+  const fromEnv = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+  if (fromEnv) return fromEnv;
+  const who = run(["whoami"], { allowFailure: true, capture: true });
+  if (who.status !== 0 || !who.stdout) return null;
+  const ids = [...new Set(who.stdout.match(/\b[0-9a-f]{32}\b/g) || [])];
+  // 多账号时猜不得，宁可不填。
+  return ids.length === 1 ? ids[0] : null;
+}
+
+function ensureAccountIdVar() {
+  const accountId = detectAccountId();
+  if (!accountId) {
+    console.log(
+      "\nCLOUDFLARE_ACCOUNT_ID not auto-detected (no login or multiple accounts); skipping. Maintenance tools that need it can be configured later in the Dashboard."
+    );
+    return;
+  }
+  upsertVarFromEnvironment("CLOUDFLARE_ACCOUNT_ID", accountId);
+  console.log(`\nCLOUDFLARE_ACCOUNT_ID auto-filled into [vars] from the deploy environment.`);
+}
+
 ensureVisibleVars();
+ensureAccountIdVar();
 ensureD1();
 ensureVectorize();
 ensureQueue();
