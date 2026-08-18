@@ -23,7 +23,7 @@ persist = true
 head_sampling_rate = 1
 
 [triggers]
-# Cloudflare cron uses UTC. 20:10 UTC is 04:10 in Singapore/China time.
+# Cloudflare cron uses UTC. 22:10 UTC is 06:10 in Singapore/China time.
 crons = ["10 22 * * *"]
 
 [ai]
@@ -97,10 +97,11 @@ queue = "ashuo-companion-memory"
 max_batch_size = 10
 max_batch_timeout = 30
 
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "ashuo-memo-kb"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "ashuo_companion_memory"
 database_id = "d43545ff-304a-48cf-a1d9-644df5b6e0c7"
-[[vectorize]]
-binding = "VECTORIZE"
-index_name = "ashuo-memo-kb"
