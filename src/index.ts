@@ -27,6 +27,7 @@ import {
 import { handleMcp } from "./api/mcp";
 import { handleModels } from "./api/models";
 import { handleRelationsGraph } from "./api/relations";
+import { handleRuntimeStatus } from "./api/runtimeStatus";
 import { runDailyMemoryDigest, runDreamBackfill } from "./memory/dailyDigest";
 import {
   runDiaryTrigger,
@@ -75,6 +76,10 @@ export default {
 
     if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/memory-admin")) {
       return handleAdmin();
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/runtime-status") {
+      return handleRuntimeStatus(request, env);
     }
 
     if (request.method === "GET" && url.pathname === "/admin/starmap") {

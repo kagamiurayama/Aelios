@@ -19,6 +19,17 @@ echo "$(openssl rand -hex 24)" | npx wrangler secret put MEMORY_MCP_API_KEY --na
 # 两把钥匙另存 /home/ubuntu/ashuo/secrets/aelios.env（0600）
 ```
 
+运行状态页还需要一项非密钥变量，值必须是阿朔自己的 Erralia 只读
+bootstrap 端点，路径固定为 `/api/v1/miniapp/ashuo/bootstrap`：
+
+```toml
+[vars]
+ERRALIA_RUNTIME_STATUS_URL = "https://<你的 Erralia 公网域名>/api/v1/miniapp/ashuo/bootstrap"
+```
+
+该页只转发 Telegram `initData` 给固定端点做身份验证，并对白名单字段作
+二次投影；不读取 Aelios Bearer token，不提供模型或会话写操作。
+
 ## MCP 挂接（两台机器各自的 ~/.kimi-code/mcp.json）
 
 ```json
