@@ -6,6 +6,8 @@ export interface Env {
   VECTORIZE_INDEX_NAME?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
+  /** Fixed Erralia read-only bootstrap endpoint for this resident's Telegram Mini App. */
+  ERRALIA_RUNTIME_STATUS_URL?: string;
   PUBLIC_MODEL_NAME?: string;
   CHAT_MODEL?: string;
   DEFAULT_UPSTREAM_MODEL?: string;
@@ -341,4 +343,3 @@ export interface PerceptionCacheRow {
   items: string;
   created_at: string;
 }
-

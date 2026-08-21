@@ -177,6 +177,8 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
     color: var(--text-1);
     font-weight: 650;
   }
+  .runtime-progress { height: 8px; overflow: hidden; border-radius: 999px; background: var(--bg-deep); }
+  .runtime-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--aurora); }
 
   /* ===== 极光系小件：徽标 / 选中态 / 图表条 ===== */
   .aurora-text { background: var(--aurora); -webkit-background-clip: text; background-clip: text; color: transparent; }
@@ -528,7 +530,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
       <section x-show="page === 'more'" class="space-y-4">
         <div>
           <h1 class="text-2xl font-semibold">更多</h1>
-          <p class="mt-1 text-sm text-zinc-400">珍贵、黑话、世界知识和维护入口。</p>
+          <p class="mt-1 text-sm text-zinc-400">运行状态、珍贵、黑话、世界知识和维护入口。</p>
         </div>
         <div class="grid grid-cols-2 gap-2 sm:flex">
           <template x-for="item in moreNav" :key="item.id">
@@ -536,6 +538,48 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
               <span x-text="item.label"></span>
             </button>
           </template>
+        </div>
+
+        <div x-show="moreView === 'runtime'" class="space-y-3">
+          <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <div class="flex items-center gap-2">
+                  <i data-lucide="gauge" class="h-4 w-4 text-coral"></i>
+                  <h2 class="font-semibold">Kimi 额度</h2>
+                </div>
+                <p class="mt-1 text-xs text-zinc-400">只读显示；不会切换模型，也不会修改当前会话。</p>
+              </div>
+              <button type="button" @click="loadRuntimeStatus()" :disabled="runtimeStatusLoading" class="tap grid h-10 w-10 shrink-0 place-items-center rounded-2xl border border-zinc-800 text-zinc-400 transition duration-150 ease-in-out hover:border-coral hover:text-zinc-100 disabled:opacity-50" aria-label="刷新额度">
+                <i data-lucide="refresh-cw" class="h-4 w-4" :class="runtimeStatusLoading ? 'breathe' : ''"></i>
+              </button>
+            </div>
+
+            <div x-show="runtimeStatusLoading" class="mt-4 rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-zinc-400">正在读取阿朔的额度…</div>
+            <div x-show="runtimeStatusError && !runtimeStatusLoading" class="mt-4 rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-coral" x-text="runtimeStatusError"></div>
+
+            <div x-show="runtimeStatus && !runtimeStatusLoading" class="mt-4 space-y-3">
+              <div class="flex flex-wrap items-center gap-2 text-xs">
+                <span class="chip" :class="runtimeStatus && runtimeStatus.stale ? 'chip-warn' : 'chip-ok'" x-text="runtimeStatus && runtimeStatus.stale ? '数据可能陈旧' : '数据新鲜'"></span>
+                <span class="text-zinc-400" x-text="runtimeCollectedLabel()"></span>
+              </div>
+              <template x-if="runtimeStatus && runtimeStatus.windows.length === 0">
+                <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-zinc-400" x-text="runtimeStatus.errorLabel || 'Kimi 暂未返回额度窗口'"></div>
+              </template>
+              <template x-for="item in (runtimeStatus ? runtimeStatus.windows : [])" :key="item.id">
+                <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4">
+                  <div class="flex items-baseline justify-between gap-3">
+                    <div class="font-semibold" x-text="item.label"></div>
+                    <div class="text-xl font-semibold aurora-text" x-text="runtimePercentLabel(item)"></div>
+                  </div>
+                  <div class="runtime-progress mt-3" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="runtimeVisualPercent(item)">
+                    <span :style="'width:' + runtimeVisualPercent(item) + '%'"></span>
+                  </div>
+                  <div class="mt-2 text-xs text-zinc-400" x-text="runtimeResetLabel(item)"></div>
+                </div>
+              </template>
+            </div>
+          </article>
         </div>
 
         <div x-show="moreView === 'precious'" class="space-y-3">
@@ -993,6 +1037,7 @@ function memoryAdmin() {
       { id: 'more', label: '更多', icon: 'layers' }
     ],
     moreNav: [
+      { id: 'runtime', label: '运行状态' },
       { id: 'precious', label: '珍贵' },
       { id: 'glossary', label: '黑话' },
       { id: 'world', label: '世界知识' },
@@ -1001,7 +1046,7 @@ function memoryAdmin() {
     canonicalMemoryTypes: ['fact', 'event', 'preference', 'relationship', 'boundary', 'habit', 'decision', 'note'],
     limits: { fact: 120, event: 80, preference: 80, relationship: 80, boundary: 80, habit: 80, decision: 80, note: 120 },
     page: 'today',
-    moreView: 'precious',
+    moreView: 'runtime',
     workerUrl: localStorage.getItem('aelios.admin.workerUrl') || location.origin,
     apiKey: localStorage.getItem('aelios.admin.apiKey') || '',
     savedApiKey: localStorage.getItem('aelios.admin.apiKey') || '',
@@ -1044,6 +1089,9 @@ function memoryAdmin() {
     dreamHarvestLoading: false,
     dreamExpanded: {},
     harvestOpen: { new: true, dim: true, judged: true },
+    runtimeStatus: null,
+    runtimeStatusLoading: false,
+    runtimeStatusError: '',
 
     init() {
       this.applyTheme();
@@ -1181,11 +1229,77 @@ function memoryAdmin() {
       }
     },
     loadMoreView() {
-      if (this.moreView === 'world') {
+      if (this.moreView === 'runtime') {
+        this.loadRuntimeStatus();
+      } else if (this.moreView === 'world') {
         this.loadWorldFacts();
       } else {
         this.icons();
       }
+    },
+    telegramInitData() {
+      const sdkValue = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData;
+      if (typeof sdkValue === 'string' && sdkValue) return sdkValue;
+      const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+      const query = new URLSearchParams(location.search);
+      return hash.get('tgWebAppData') || query.get('tgWebAppData') || '';
+    },
+    async loadRuntimeStatus() {
+      if (this.runtimeStatusLoading) return;
+      const initData = this.telegramInitData();
+      if (!initData) {
+        this.runtimeStatus = null;
+        this.runtimeStatusError = '请从阿朔的 Telegram 私聊菜单打开 Aelios。';
+        return;
+      }
+      this.runtimeStatusLoading = true;
+      this.runtimeStatusError = '';
+      try {
+        const response = await fetch('/admin/runtime-status', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ initData: initData })
+        });
+        const text = await response.text();
+        let payload = null;
+        try { payload = text ? JSON.parse(text) : null; } catch (error) { payload = null; }
+        if (!response.ok || !payload || payload.ok !== true || !payload.data) {
+          const code = payload && payload.error;
+          if (code === 'telegram_auth_failed') throw new Error('Telegram 身份已过期，请关闭后从阿朔私聊重新打开。');
+          if (code === 'runtime_status_not_configured') throw new Error('运行状态尚未接通。');
+          throw new Error('Kimi 额度暂时读取失败，请稍后重试。');
+        }
+        this.runtimeStatus = payload.data;
+      } catch (error) {
+        this.runtimeStatus = null;
+        this.runtimeStatusError = error && error.message ? error.message : 'Kimi 额度暂时读取失败，请稍后重试。';
+      }
+      this.runtimeStatusLoading = false;
+      this.icons();
+    },
+    runtimePercentLabel(item) {
+      const value = item && item.percentage ? Number(item.percentage.value) : NaN;
+      return Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 1 }) + '%' : '—';
+    },
+    runtimeVisualPercent(item) {
+      const value = item && item.percentage ? Number(item.percentage.value) : 0;
+      return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+    },
+    runtimeResetLabel(item) {
+      if (!item || !item.resetAt) return '下次重置：未知';
+      const reset = new Date(item.resetAt);
+      if (!Number.isFinite(reset.getTime())) return '下次重置：未知';
+      const remaining = Math.max(0, reset.getTime() - Date.now());
+      const minutes = Math.floor(remaining / 60000);
+      const days = Math.floor(minutes / 1440);
+      const hours = Math.floor((minutes % 1440) / 60);
+      const mins = minutes % 60;
+      return '下次重置：' + (days ? days + ' 天 ' : '') + (hours ? hours + ' 小时 ' : '') + mins + ' 分钟';
+    },
+    runtimeCollectedLabel() {
+      if (!this.runtimeStatus || !this.runtimeStatus.collectedAt) return '采集时间未知';
+      const collected = new Date(this.runtimeStatus.collectedAt);
+      return Number.isFinite(collected.getTime()) ? '采集于 ' + collected.toLocaleString('zh-CN', { hour12: false }) : '采集时间未知';
     },
     async loadWorldFacts() {
       try {
