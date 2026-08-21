@@ -144,9 +144,19 @@ export async function handleRuntimeStatus(
         "user-agent": "Aelios-Runtime-Status/1.0"
       },
       body: JSON.stringify({ initData: body.initData }),
-      redirect: "error",
+      // Cloudflare Workers does not implement redirect="error". Keep the
+      // boundary fail-closed by receiving redirects manually and rejecting
+      // them before reading or projecting any upstream response.
+      redirect: "manual",
       signal: controller.signal
     });
+    if (
+      upstream.redirected ||
+      (upstream.status >= 300 && upstream.status < 400) ||
+      upstream.headers.has("location")
+    ) {
+      return jsonResponse(502, { ok: false, error: "runtime_status_unavailable" });
+    }
     const text = await upstream.text();
     if (text.length > MAX_UPSTREAM_BYTES) {
       return jsonResponse(502, { ok: false, error: "runtime_status_upstream_invalid" });

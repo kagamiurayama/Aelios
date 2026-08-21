@@ -40,7 +40,7 @@ const okFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Re
   calls += 1;
   assert.equal(String(input), endpoint);
   assert.equal(init?.method, "POST");
-  assert.equal(init?.redirect, "error");
+  assert.equal(init?.redirect, "manual");
   assert.equal(new Headers(init?.headers).get("user-agent"), "Aelios-Runtime-Status/1.0");
   assert.deepEqual(JSON.parse(String(init?.body)), { initData: "signed-telegram-data" });
   return new Response(JSON.stringify(panel), { status: 200 });
@@ -54,6 +54,14 @@ assert.equal(goodBody.data.residentId, "ashuo");
 assert.equal("currentModel" in goodBody.data, false);
 assert.equal("secretFutureField" in goodBody.data, false);
 assert.equal(calls, 1);
+
+const redirected = await handleRuntimeStatus(
+  request({ initData: "signed-telegram-data" }),
+  env,
+  async () => Response.redirect("https://redirect.example/private", 302)
+);
+assert.equal(redirected.status, 502);
+assert.deepEqual(await redirected.json(), { ok: false, error: "runtime_status_unavailable" });
 
 for (const badBody of [
   {},
@@ -92,6 +100,8 @@ assert.equal(unauthorized.status, 401);
 assert.deepEqual(await unauthorized.json(), { ok: false, error: "telegram_auth_failed" });
 
 const ui = await readFile(new URL("../src/api/admin/ui.ts", import.meta.url), "utf8");
+const wrangler = await readFile(new URL("../wrangler.toml", import.meta.url), "utf8");
+assert.match(wrangler, /compatibility_flags\s*=\s*\["global_fetch_strictly_public"\]/);
 assert.match(ui, /moreView === 'runtime'/);
 assert.match(ui, /\/admin\/runtime-status/);
 assert.doesNotMatch(ui, /runtime-status[\s\S]{0,400}(switch|modelOptions|thinkingOptions)/i);
