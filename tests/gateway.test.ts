@@ -149,11 +149,12 @@ test("model catalog falls back to main-model hints when the upstream cannot answ
   try {
     const models = await run("/v1/models");
     assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
-    assert.equal(models.response.headers.get("x-aelios-models"), "fallback");
+    assert.equal(models.response.headers.get("x-aelios-models"), "fallback:upstream-404");
   } finally { globalThis.fetch = mock; }
   delete env.CLOUDFLARE_API_TOKEN;
   const offline = await run("/v1/models");
   assert.deepEqual(JSON.parse(offline.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
+  assert.equal(offline.response.headers.get("x-aelios-models"), "fallback:no-token");
 });
 
 test("auxiliary and incomplete replies do not become Dream sources", async () => {

@@ -18,7 +18,8 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
   // The catalog lives on the AI Gateway compat surface; CF REST has no GET /models (405).
   const token = env.CLOUDFLARE_API_TOKEN;
   const address = config.upstream?.address?.trim() || env.AI_GATEWAY_BASE_URL || env.CLOUDFLARE_ACCOUNT_ID || "";
-  if (token && address) {
+  let reason = !token ? "no-token" : !address ? "no-address" : "";
+  if (!reason) {
     const url = /^[a-f0-9]{32}$/i.test(address)
       ? `https://gateway.ai.cloudflare.com/v1/${address}/${env.AI_GATEWAY_ID || "default"}/compat/models`
       : `${address.replace(/\/+$/, "")}/models`;
@@ -28,7 +29,8 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
         "content-type": upstream.headers.get("content-type") || "application/json",
         "cache-control": "private, no-store", "x-aelios-identity": identity.slug,
         "x-aelios-models": "upstream" } });
-    } catch { /* fall through to local hints */ }
+      reason = `upstream-${upstream.status}`;
+    } catch { reason = "upstream-error"; }
   }
   return json(
     {
@@ -37,6 +39,6 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
         .filter(model => !model.includes("*"))
         .map(model => ({ id: model, object: "model", created: 0, owned_by: identity.slug }))
     },
-    { headers: { "Cache-Control": "private, no-store", "x-aelios-models": "fallback" } }
+    { headers: { "Cache-Control": "private, no-store", "x-aelios-models": `fallback:${reason}` } }
   );
 }
