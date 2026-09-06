@@ -1,4 +1,5 @@
 import { nowIso } from "../../utils/time";
+import { parseStringArray } from "../../utils/parse";
 
 // =====================================================================
 // 昨天日志 daily_log (dream 每天写一条，boot 读"昨天")
@@ -9,7 +10,32 @@ export interface DailyLogRow {
   date: string;
   title: string;
   summary: string;
+  source_message_ids: string[];
   updated_at: string;
+}
+
+function readSourceMessageIds(value: unknown): string[] {
+  return parseStringArray(value);
+}
+
+type DailyLogDbRow = {
+  namespace: string;
+  date: string;
+  title: string;
+  summary: string;
+  source_message_ids?: string | null;
+  updated_at: string;
+};
+
+function mapDailyLog(row: DailyLogDbRow): DailyLogRow {
+  return {
+    namespace: row.namespace,
+    date: row.date,
+    title: row.title,
+    summary: row.summary,
+    source_message_ids: readSourceMessageIds(row.source_message_ids),
+    updated_at: row.updated_at
+  };
 }
 
 export async function getDailyLog(
@@ -17,25 +43,38 @@ export async function getDailyLog(
   input: { namespace: string; date: string }
 ): Promise<DailyLogRow | null> {
   const row = await db
-    .prepare("SELECT namespace, date, title, summary, updated_at FROM daily_log WHERE namespace = ? AND date = ?")
+    .prepare("SELECT namespace, date, title, summary, source_message_ids, updated_at FROM daily_log WHERE namespace = ? AND date = ?")
     .bind(input.namespace, input.date)
-    .first<DailyLogRow>();
-  return row ?? null;
+    .first<DailyLogDbRow>();
+  return row ? mapDailyLog(row) : null;
 }
 
 export async function upsertDailyLog(
   db: D1Database,
-  input: { namespace: string; date: string; title: string; summary: string }
+  input: { namespace: string; date: string; title: string; summary: string; sourceMessageIds?: string[] }
 ): Promise<DailyLogRow> {
   const now = nowIso();
+  const sourceMessageIds = [...new Set((input.sourceMessageIds ?? []).filter(Boolean))];
+  const encoded = JSON.stringify(sourceMessageIds);
   await db
     .prepare(
-      `INSERT INTO daily_log (namespace, date, title, summary, updated_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(namespace, date) DO UPDATE SET title = excluded.title, summary = excluded.summary, updated_at = excluded.updated_at`
+      `INSERT INTO daily_log (namespace, date, title, summary, source_message_ids, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(namespace, date) DO UPDATE SET
+         title = excluded.title,
+         summary = excluded.summary,
+         source_message_ids = excluded.source_message_ids,
+         updated_at = excluded.updated_at`
     )
-    .bind(input.namespace, input.date, input.title, input.summary, now)
+    .bind(input.namespace, input.date, input.title, input.summary, encoded, now)
     .run();
-  return { namespace: input.namespace, date: input.date, title: input.title, summary: input.summary, updated_at: now };
+  return {
+    namespace: input.namespace,
+    date: input.date,
+    title: input.title,
+    summary: input.summary,
+    source_message_ids: sourceMessageIds,
+    updated_at: now
+  };
 }
 
 export async function listDailyLogsInRange(
@@ -44,7 +83,7 @@ export async function listDailyLogsInRange(
 ): Promise<DailyLogRow[]> {
   const result = await db
     .prepare(
-      `SELECT namespace, date, title, summary, updated_at
+      `SELECT namespace, date, title, summary, source_message_ids, updated_at
        FROM daily_log
        WHERE namespace = ?
          AND date >= ?
@@ -52,8 +91,8 @@ export async function listDailyLogsInRange(
        ORDER BY date ASC`
     )
     .bind(input.namespace, input.startDate, input.endDate)
-    .all<DailyLogRow>();
-  return result.results ?? [];
+    .all<DailyLogDbRow>();
+  return (result.results ?? []).map(mapDailyLog);
 }
 
 export async function listRecentDailyLogs(
@@ -63,15 +102,15 @@ export async function listRecentDailyLogs(
   const limit = Math.min(Math.max(Math.floor(input.limit), 1), 100);
   const result = await db
     .prepare(
-      `SELECT namespace, date, title, summary, updated_at
+      `SELECT namespace, date, title, summary, source_message_ids, updated_at
        FROM daily_log
        WHERE namespace = ?
        ORDER BY date DESC
        LIMIT ?`
     )
     .bind(input.namespace, limit)
-    .all<DailyLogRow>();
-  return result.results ?? [];
+    .all<DailyLogDbRow>();
+  return (result.results ?? []).map(mapDailyLog);
 }
 
 export async function listDailyLogDatesBefore(

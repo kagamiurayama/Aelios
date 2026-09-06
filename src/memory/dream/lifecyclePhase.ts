@@ -162,7 +162,8 @@ export async function applyDreamV2(
     namespace,
     date: dateLabel,
     title: digest.title ?? dateLabel,
-    summary: digest.summary ?? ""
+    summary: digest.summary ?? "",
+    sourceMessageIds: messageIds
   });
 
   return { added: 0, updated, deleted, queuedCandidates, longtail: 0, errors };

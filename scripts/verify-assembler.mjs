@@ -98,7 +98,7 @@ function formatBootStable(boot) {
   const parts = [];
   const impressions = buildImpressionsLadder(boot);
   if (impressions.length > 0) {
-    parts.push("<impressions>", ...impressions, "</impressions>");
+    parts.push("<impressions>", "印象性总结，具体事实请回溯正本。", ...impressions, "</impressions>");
   }
   if (boot.glossary && boot.glossary.length > 0) {
     const entries = boot.glossary.map((g) => `${g.term}: ${g.definition}`);

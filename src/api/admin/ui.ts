@@ -619,7 +619,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
         <div class="flex items-center justify-between gap-3">
           <div class="min-w-0 flex-1">
             <h1 class="text-2xl font-semibold">日记</h1>
-            <p class="mt-1 text-sm text-zinc-400">每日叙事日记与已卷起的周记。</p>
+            <p class="mt-1 text-sm text-zinc-400">每日叙事日记与已卷起的周记。日记是印象，具体事实请回溯正本。</p>
           </div>
           <button type="button" @click="loadDiary()" class="tap inline-flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900 px-4 text-sm transition duration-150 ease-in-out hover:border-coral">
             <i data-lucide="refresh-cw" class="h-4 w-4"></i><span>刷新</span>
@@ -663,6 +663,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
                 <span x-text="fmt(entry.updated_at)"></span>
               </div>
               <h3 class="text-base font-semibold text-zinc-100" x-text="entry.title"></h3>
+              <p class="mt-1 text-xs text-zinc-500" x-show="entry.source_message_ids && entry.source_message_ids.length" x-text="(entry.source_message_ids || []).length + ' 条原文可溯源'"></p>
               <p class="mt-2 whitespace-pre-wrap text-sm leading-7 text-zinc-300" :class="isDiaryExpanded('daily:' + entry.date) ? '' : 'line-clamp-4'" x-text="entry.summary"></p>
               <button type="button" @click="toggleDiaryExpand('daily:' + entry.date)" class="tap mt-2 text-xs text-coral transition duration-150 ease-in-out hover:underline" x-text="isDiaryExpanded('daily:' + entry.date) ? '收起' : '展开全文'"></button>
             </article>

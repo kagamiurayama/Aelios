@@ -171,6 +171,11 @@ export async function handleChatCompletions(
         runRecall(env, {
           namespace,
           query: lastUserText,
+          recent: body.messages
+            .filter((message) => message.role === "user")
+            .map((message) => extractLastUserText([message]))
+            .filter(Boolean)
+            .slice(-4, -1),
           core_fingerprint: coreFingerprint,
           waitUntil: ctx.waitUntil.bind(ctx)
         })

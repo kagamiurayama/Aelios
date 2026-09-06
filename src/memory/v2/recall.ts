@@ -1,9 +1,9 @@
 // Aelios 记忆库 v2 召回管线 (母帖 #11 第 2/3 步)
 // boot: 冷启动包 (L1 摘要 + 昨天日志 + top pinned 珍贵)，输出稳定、确定性排序。
-// recall: 每轮动态召回 (黑话词面 → memories 向量 → world_fact → 长尾兜底)，闸三降权。
+// recall: 每轮动态召回 (黑话词面 → memories 向量+词面 RRF → world_fact → 长尾兜底)，闸三降权。
 //
 // 召回逻辑优先级 (母帖第三节，非物理摆放):
-//   词面命中(黑话) → 核心(L1 摘要 + 命中珍贵) → 重要记忆+世界知识(向量) → 全空才落长尾
+//   词面命中(黑话) → 核心(L1 摘要 + 命中珍贵) → 重要记忆+世界知识(混合检索) → 全空才落长尾
 //
 // 去重三闸:
 //   闸一: 珍贵不进每轮 query 召回池，归 boot 固定供给 (这里 recall 不查 precious)。
@@ -27,6 +27,7 @@ import { searchMemoriesWithProvenance } from "../search";
 import type { MemoryApiRecordWithProvenance } from "../search";
 import { filterAndCompressMemories } from "../filter";
 import { createEmbedding } from "../embedding";
+import { shapeRecallQuery } from "../queryShape";
 import { expandRecallByRelations, isRelationExpansionEnabled } from "../relations";
 import type { RelationExpansionMeta } from "../relations";
 import { loadSpontaneousForBoot } from "../perception";
@@ -311,6 +312,8 @@ async function listAllGlossary(
 export interface RecallInput {
   namespace: string;
   query: string;
+  // Prior human turns. Thin queries ("那个呢") reuse this as embedding context.
+  recent?: string[];
   k?: number;
   types?: string[];
   min_score?: number;
@@ -399,19 +402,23 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   }
   const minScore = readRecallMinScore(env, input.min_score);
 
+  const shaped = shapeRecallQuery({ query, recent: input.recent });
+  const glossaryQuery = [query, ...(input.recent ?? [])].filter(Boolean).join("\n");
+
   // 1. 黑话词面命中 (L5，不进向量，走词面)
   const glossaryRows = await matchGlossary(env.DB, {
     namespace: input.namespace,
-    query
+    query: glossaryQuery
   });
   const glossaryHits = glossaryRows.map((r) => ({ term: r.term, definition: r.definition }));
 
-  // 2. memories 向量召回 (L4 + L6 world_fact，active only)
+  // 2. memories 混合召回 (向量 + 词面 RRF，L4 + L6 world_fact，active only)
   //    闸一: 不查 precious。precious 归 boot 固定供给, 不进每轮 query 召回池。
-  const k = Math.min(Math.max(Math.floor(input.k ?? 3), 1), 100);
+  const k = Math.min(Math.max(Math.floor(input.k ?? 8), 1), 100);
   const searchResult = await searchMemoriesWithProvenance(env, {
     namespace: input.namespace,
-    query,
+    query: shaped.embeddingQuery,
+    lexicalTokens: shaped.lexicalTokens,
     types: input.types,
     topK: k,
     includeHistory: input.include_history === true,

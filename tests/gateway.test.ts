@@ -64,18 +64,23 @@ async function run(path: string, body?: any, headers?: any) {
 }
 function count(table: string) { return sqlite.prepare(`SELECT count(*) AS n FROM ${table}`).get()!.n; }
 function precious(namespace: string, content: string) {
-  sqlite.prepare("INSERT INTO precious (id, namespace, content, created_at) VALUES (?, ?, ?, ?)").run(namespace, namespace, content, "2026-09-06");
+  const id = `${namespace}-${content.slice(0, 24)}`;
+  sqlite.prepare("INSERT INTO precious (id, namespace, content, created_at) VALUES (?, ?, ?, ?)").run(id, namespace, content, "2026-09-06");
 }
 
 test("migrations, native chat recall, namespace isolation, original text and Queue dedup", async () => {
-  precious("partner-a", "喜欢 Cloudflare"); precious("partner-b", "other identity private memory");
+  precious("partner-a", "喜欢 Cloudflare"); precious("partner-a", "昨天吃了番茄炒蛋");
+  precious("partner-b", "other identity private memory");
   const body = { model: "partner", messages: [{ role: "user", content: "我们喜欢什么？" }], extra_future_field: { opaque: true } };
   const { response } = await run("/v1/chat/completions", body);
   assert.equal(response.status, 200); assert.equal(response.headers.get("x-aelios-memory"), "injected");
   assert.equal(calls[0].url, "https://upstream.test/ai/v1/chat/completions");
   assert.equal(calls[0].headers.authorization, "Bearer cf-token");
   assert.match(calls[0].query.messages[0].content, /喜欢 Cloudflare/);
+  assert.match(calls[0].query.messages[0].content, /- \[precious\] 喜欢 Cloudflare/);
+  assert.doesNotMatch(calls[0].query.messages[0].content, /番茄炒蛋/);
   assert.doesNotMatch(calls[0].query.messages[0].content, /other identity/);
+  assert.doesNotMatch(calls[0].query.messages[0].content, /\[\{"kind"/);
   assert.deepEqual(calls[0].query.extra_future_field, body.extra_future_field);
   assert.equal(queue[0].userText, "我们喜欢什么？"); assert.equal(queue[0].completion, "complete");
   await persistExchange(env, queue[0]); await persistExchange(env, queue[0]);
@@ -186,20 +191,21 @@ test("retry hashes ignore key order but distinguish later repeated words and ses
 });
 test("main-model whitelist gates recall and recording; other models pass through untouched", async () => {
   precious("partner-a", "喜欢 Cloudflare");
-  const ask = (model: string) => run("/v1/chat/completions", { model, messages: [{ role: "user", content: "Hi " + model }] });
+  const ask = (model: string, text = "Hi " + model + " 我们喜欢 Cloudflare 吗") =>
+    run("/v1/chat/completions", { model, messages: [{ role: "user", content: text }] });
   await ask("partner");
   assert.equal(calls[0].query.model, "partner");
-  assert.match(JSON.stringify(calls[0].query.messages), /Cloudflare/);
+  assert.match(JSON.stringify(calls[0].query.messages), /\[precious\] 喜欢 Cloudflare/);
   // Basename match: a glob pattern sees the model name with or without its author prefix.
   const opus = await ask("anthropic/claude-opus-4-6");
   assert.equal(opus.response.headers.get("x-aelios-memory"), "injected");
   assert.equal(calls[1].query.model, "anthropic/claude-opus-4-6");
   assert.equal(queue.length, 2);
   // Off the list: no recall, no record, model name delivered byte-identical.
-  const small = await ask("claude-haiku-4-5");
+  const small = await ask("claude-haiku-4-5", "Hi claude-haiku-4-5");
   assert.equal(small.response.headers.get("x-aelios-memory"), "off");
   assert.equal(calls[2].query.model, "claude-haiku-4-5");
-  assert.doesNotMatch(JSON.stringify(calls[2].query.messages), /Cloudflare/);
+  assert.doesNotMatch(JSON.stringify(calls[2].query.messages), /喜欢 Cloudflare/);
   assert.equal(queue.length, 2);
 });
 test("SSE byte-exact Unicode and CRLF boundaries; no thinking in observed text", async () => {
@@ -260,7 +266,7 @@ test("missing CF token fails loudly instead of leaking another credential", asyn
 test("thinking passthrough skips memory; explicit disabled thinking allows injection", async () => {
   precious("partner-a", "Cloudflare fan");
   setConfig(config([{ ...identity(), anthropicThinking: "passthrough" }]));
-  const body = { model: "partner", messages: [{ role: "user", content: "Hi" }], thinking: { type: "adaptive" } };
+  const body = { model: "partner", messages: [{ role: "user", content: "Hi Cloudflare" }], thinking: { type: "adaptive" } };
   assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "thinking-passthrough");
   assert.deepEqual(calls[0].query.thinking, body.thinking); assert.deepEqual(calls[0].query.messages, body.messages);
   assert.equal((await run("/v1/messages", { ...body, thinking: { type: "disabled" } })).response.headers.get("x-aelios-memory"), "injected");

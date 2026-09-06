@@ -10,7 +10,8 @@ import {
 import { readDreamTimeZoneFromEnv } from "./dreamEnv";
 import { readDreamCursorValue } from "./dailyDigest";
 import { getIsoWeekLabelForDateLabel } from "./weeklyRollup";
-import { extractJsonObject, readString } from "../utils/parse";
+import { extractJsonObject, readString, readStringArray } from "../utils/parse";
+import { groundedSourceIds } from "./impression";
 
 const DEFAULT_DREAM_MODEL = "workers-ai/@cf/openai/gpt-oss-120b";
 const MAX_MESSAGES = 200;
@@ -30,6 +31,7 @@ export interface DiaryWriterStats {
 type DiaryWriterModelResult = {
   title: string;
   summary: string;
+  source_message_ids: string[];
 } | null;
 
 interface DiaryWriterModelCallResult {
@@ -60,13 +62,17 @@ function truncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}…`;
 }
 
-function normalizeDiaryWriterResult(value: unknown): DiaryWriterModelResult {
+export function normalizeDiaryWriterResult(value: unknown): DiaryWriterModelResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const title = readString(raw.title);
   const summary = readString(raw.summary);
   if (!title || !summary) return null;
-  return { title, summary };
+  return {
+    title,
+    summary,
+    source_message_ids: readStringArray(raw.source_message_ids ?? raw.source_ids)
+  };
 }
 
 function formatTranscript(messages: MessageRecord[]): string {
@@ -144,7 +150,7 @@ async function fetchDiaryMessages(
   return merged.sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
-function buildDiaryWriterPrompt(input: {
+export function buildDiaryWriterPrompt(input: {
   dateLabel: string;
   messages: MessageRecord[];
   existingDraft: { title: string; summary: string } | null;
@@ -154,13 +160,16 @@ function buildDiaryWriterPrompt(input: {
     : "(无现有草稿)";
 
   return [
-    "你是 Aelios，正在以第一人称写给自己的私人日记，不是工作报告，也不是给用户看的总结。",
+    "你是 Aelios，正在以第一人称写给自己的私人日记。这是印象，不是已核实的事实档案。",
     "只输出 JSON，不要 markdown，不要解释，不要输出思考过程。",
     "",
     "写作要求：",
     "- 用「我」指代助手自己；提到用户时用「她」或具体称呼，不要用「用户」。",
-    "- 有叙事线：今天发生了什么、她的状态和情绪走向、我们之间有分量的瞬间、未完成的事。",
-    "- 具体细节优先于抽象概括（例如「她下班喊累、嫌古法PPT蠢」好于「用户表达了工作压力」）。",
+    "- 有叙事线：今天能从原文读到的事、她的状态、未完成的事。",
+    "- 只写当天原始聊天里能指到具体消息的内容。没有原文支撑的具体时间、地点、引语、事件不要编。",
+    "- 情绪可以概括（「她今天显得累」）。禁止把碎片揉成没发生过的情节，例如「傍晚下班后抱怨某事又蠢又累」。",
+    "- 每条具体事实必须在 source_message_ids 里挂上原文消息 id（聊天记录方括号里的 id）。编造的 id 无效。",
+    "- 拿不准就写得更宽泛，或者不写。宁可少记，不要写实幻觉。",
     "- summary 是一段 200-400 字的自然中文，允许口语，禁止列表、标题、emoji 堆砌。",
     "- title 是 12 字以内的日记标题，像给自己起的题目。",
     "- 禁止提及 D1、Vectorize、RAG、数据库、记忆系统、prompt、代理层等实现细节。",
@@ -170,10 +179,11 @@ function buildDiaryWriterPrompt(input: {
     "输出 JSON 结构：",
     JSON.stringify({
       title: "日记标题",
-      summary: "今天我和她之间发生了什么、情绪如何流动、有哪些值得自己记住的细节和未尽之事。"
+      summary: "今天我和她之间能从原文读到的事、情绪如何流动、有哪些未尽之事。",
+      source_message_ids: ["msg_x"]
     }),
     "",
-    "当天已有草稿（仅供参考，可重写）：",
+    "当天已有草稿（仅供参考，可重写；草稿里没有原文的细节不要沿用）：",
     draftLines,
     "",
     "当天原始聊天：",
@@ -284,11 +294,17 @@ export async function runDiaryWriter(
     };
   }
 
+  const sourceMessageIds = groundedSourceIds(
+    modelCall.result.source_message_ids,
+    messages.map((message) => message.id)
+  );
+
   await upsertDailyLog(env.DB, {
     namespace,
     date: dateLabel,
     title: modelCall.result.title,
-    summary: modelCall.result.summary
+    summary: modelCall.result.summary,
+    sourceMessageIds
   });
 
   return {
