@@ -68,7 +68,7 @@ details{margin-top:8px}summary{cursor:pointer;color:#a6b4c3}
 <div class="row"><button id="load">读取</button><button id="save">保存</button></div><div id="status" role="status" aria-live="polite"></div></section>
 
 <section><h2>上游连接</h2>
-<label>上游地址<input id="cfAddress" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1"><div class="hint">填账号 ID 时，聊天走 <code>gateway.ai.cloudflare.com/v1/账号/GatewayID/compat</code>，自定义 Provider（<code>custom-…</code>）和动态路由都要这个路径。Gateway ID 在下面环境设置里填，默认 <code>default</code>。填完整地址就原样当 OpenAI 兼容上游。令牌去 Worker Secrets 加 <code>CLOUDFLARE_API_TOKEN</code>。</div></label></section>
+<label>上游地址<input id="cfAddress" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1"><div class="hint">填账号 ID，或把能拉到模型列表的地址贴进来：<code>https://gateway.ai.cloudflare.com/v1/账号/default/compat/</code>。模型列表固定走 <code>…/compat/models</code>，聊天/Messages/Responses 都从同一条 <code>…/compat</code> 往后拼。Gateway ID 在下面环境设置里，默认 <code>default</code>。填别的 OpenAI 兼容地址就原样用。令牌去 Worker Secrets 加 <code>CLOUDFLARE_API_TOKEN</code>。</div></label></section>
 
 <section><h2>老公们</h2><p class="hint">每位三格：名字、主模型、钥匙。主模型支持 <code>*</code> 通配，写不写 <code>anthropic/</code> 前缀都能认。</p>
 <div id="identities"></div><button id="addIdentity" class="ghost">+ 添加一位</button></section>

@@ -3,101 +3,79 @@ import { PATHS, type GatewayConfig, type Identity, type Protocol } from "./confi
 import { applyThinkingPolicy, type Body } from "./protocol";
 
 const ACCOUNT_RE = /^[a-f0-9]{32}$/i;
+/** Second path segment that is a protocol leftover, not a Gateway ID. */
+const NOT_GATEWAY = /^(compat|v1|models|chat|messages|responses)$/i;
 const GATEWAY_HOST_RE =
-  /^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/([a-f0-9]{32})\/([^/]+)(?:\/(.*))?$/i;
+  /^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/([a-f0-9]{32})(?:\/([^/]+))?(?:\/(.*))?$/i;
 const REST_HOST_RE =
-  /^https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/([a-f0-9]{32})\/ai(?:\/v1)?$/i;
+  /^https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/([a-f0-9]{32})(?:\/.*)?$/i;
 
 export interface ResolvedUpstream {
   accountId: string | null;
   gatewayId: string;
-  /** OpenAI-compat / custom-provider / dynamic-route base (no trailing slash). */
-  compatBase: string | null;
-  /** CF REST AI base for Anthropic Messages and Responses. */
-  restBase: string | null;
-  /** Non-CF OpenAI-compatible base the user typed. */
-  customBase: string | null;
+  /** Always `.../{gateway}/compat` for CF. Custom OpenAI bases stay as typed. */
+  base: string;
 }
 
 function configuredAddress(env: Env, config: GatewayConfig): string {
   return config.upstream?.address?.trim() || env.AI_GATEWAY_BASE_URL || env.CLOUDFLARE_ACCOUNT_ID || "";
 }
 
+/** The only CF catalog that actually lists models. Do not change this shape. */
+export function compatBase(accountId: string, gatewayId: string): string {
+  return `https://gateway.ai.cloudflare.com/v1/${accountId.toLowerCase()}/${gatewayId}/compat`;
+}
+
 export function resolveGatewayId(env: Env, address = ""): string {
-  const fromUrl = address.match(GATEWAY_HOST_RE);
-  if (fromUrl?.[2] && fromUrl[2].toLowerCase() !== "compat") return fromUrl[2];
+  const fromUrl = stripAddress(address).match(GATEWAY_HOST_RE);
+  if (fromUrl?.[2] && !NOT_GATEWAY.test(fromUrl[2])) return fromUrl[2];
   return env.AI_GATEWAY_ID?.trim() || "default";
+}
+
+function stripAddress(address: string): string {
+  return address.trim().replace(/\/+$/, "");
+}
+
+function parseGatewayHost(address: string): { accountId: string } | null {
+  const match = stripAddress(address).match(GATEWAY_HOST_RE);
+  return match ? { accountId: match[1] } : null;
 }
 
 export function resolveUpstream(env: Env, config: GatewayConfig): ResolvedUpstream {
   const address = configuredAddress(env, config);
-  if (!address) {
-    throw new Error("Upstream not configured. Set the CF account in /admin/gateway.");
-  }
-  const trimmed = address.replace(/\/+$/, "");
+  if (!address) throw new Error("Upstream not configured. Set the CF account in /admin/gateway.");
+  const trimmed = stripAddress(address);
   const gatewayId = resolveGatewayId(env, trimmed);
 
   if (ACCOUNT_RE.test(trimmed)) {
-    return {
-      accountId: trimmed,
-      gatewayId,
-      compatBase: `https://gateway.ai.cloudflare.com/v1/${trimmed}/${gatewayId}/compat`,
-      restBase: `https://api.cloudflare.com/client/v4/accounts/${trimmed}/ai/v1`,
-      customBase: null
-    };
+    return { accountId: trimmed.toLowerCase(), gatewayId, base: compatBase(trimmed, gatewayId) };
   }
 
   const rest = trimmed.match(REST_HOST_RE);
   if (rest) {
-    return {
-      accountId: rest[1],
-      gatewayId,
-      compatBase: `https://gateway.ai.cloudflare.com/v1/${rest[1]}/${gatewayId}/compat`,
-      restBase: `https://api.cloudflare.com/client/v4/accounts/${rest[1]}/ai/v1`,
-      customBase: null
-    };
+    return { accountId: rest[1].toLowerCase(), gatewayId, base: compatBase(rest[1], gatewayId) };
   }
 
-  const gw = trimmed.match(GATEWAY_HOST_RE);
+  const gw = parseGatewayHost(trimmed);
   if (gw) {
-    const accountId = gw[1];
-    const namedGateway = gw[2];
-    const restPath = (gw[3] || "").replace(/\/+$/, "");
-    const isBareGateway = !restPath || restPath.toLowerCase() === "compat";
-    return {
-      accountId,
-      gatewayId: namedGateway,
-      compatBase: isBareGateway
-        ? `https://gateway.ai.cloudflare.com/v1/${accountId}/${namedGateway}/compat`
-        : trimmed,
-      restBase: `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`,
-      customBase: isBareGateway ? null : trimmed
-    };
+    return { accountId: gw.accountId.toLowerCase(), gatewayId, base: compatBase(gw.accountId, gatewayId) };
   }
 
-  return { accountId: null, gatewayId, compatBase: null, restBase: null, customBase: trimmed };
+  return { accountId: null, gatewayId, base: trimmed };
 }
 
-/**
- * Chat (and anything OpenAI-compat) must hit the Gateway Unified URL that includes
- * `{gateway_id}/compat`. Custom providers and dynamic routes only exist on that host.
- * Messages/Responses stay on the CF REST AI base, which documents those schemas.
- */
-export function upstreamBaseUrl(env: Env, config: GatewayConfig, protocol: Protocol = "chat"): string {
-  const resolved = resolveUpstream(env, config);
-  if (resolved.customBase && !resolved.compatBase) return resolved.customBase;
-  if (protocol === "chat") return resolved.compatBase || resolved.customBase || resolved.restBase!;
-  return resolved.restBase || resolved.customBase || resolved.compatBase!;
+/** Same base the model list uses. Chat / messages / responses only append their path. */
+export function upstreamBaseUrl(env: Env, config: GatewayConfig, _protocol?: Protocol): string {
+  return resolveUpstream(env, config).base;
 }
 
+/** Do not change this shape: GET {compat}/models is the catalog CF actually serves. */
 export function catalogUrl(env: Env, config: GatewayConfig): string {
   const resolved = resolveUpstream(env, config);
-  if (resolved.compatBase) return `${resolved.compatBase}/models`;
-  return `${resolved.customBase}/models`;
+  if (resolved.accountId) return `${compatBase(resolved.accountId, resolved.gatewayId)}/models`;
+  return `${resolved.base}/models`;
 }
 
-// One call, one upstream. Model names pass through as written; provider routing,
-// retries and fallback are AI Gateway's job, configured in its own dashboard.
 export async function callGatewayUpstream(env: Env, config: GatewayConfig, identity: Identity,
   protocol: Protocol, original: Request, body: Body): Promise<Response> {
   const token = env.CLOUDFLARE_API_TOKEN;
@@ -115,7 +93,7 @@ export async function callGatewayUpstream(env: Env, config: GatewayConfig, ident
   if (protocol === "messages" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
   if (resolved.gatewayId) headers.set("cf-aig-gateway-id", resolved.gatewayId);
   applyThinkingPolicy(body, identity, protocol, headers);
-  return fetch(`${upstreamBaseUrl(env, config, protocol)}/${PATHS[protocol]}`, {
+  return fetch(`${resolved.base}/${PATHS[protocol]}`, {
     method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"
   });
 }

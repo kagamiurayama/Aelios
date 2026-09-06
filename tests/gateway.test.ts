@@ -6,7 +6,7 @@ import { timingSafeEqual } from "node:crypto";
 import worker from "../src/index";
 import { invalidateSettingsCache, validateConfig } from "../src/gateway/config";
 import { appendMemory, classifyTurn, canonical } from "../src/gateway/protocol";
-import { upstreamBaseUrl } from "../src/gateway/upstream";
+import { catalogUrl, upstreamBaseUrl } from "../src/gateway/upstream";
 import { OutputCollector, observeResponse, persistExchange, prepareExchange, dispatchExchange } from "../src/gateway/record";
 
 // Test actual production modules and SQL, replacing only the external HTTP call.
@@ -169,13 +169,27 @@ test("model catalog falls back to main-model hints when the upstream cannot answ
 });
 test("legacy CF address forms still reach the compat catalog", async () => {
   const acct = "a".repeat(32);
-  for (const address of [acct, `https://gateway.ai.cloudflare.com/v1/${acct}/default`,
+  const catalog = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/models`;
+  for (const address of [acct,
+    `https://gateway.ai.cloudflare.com/v1/${acct}`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/compat`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/`,
     `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`,
-    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`]) {
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/models`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/models/`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/chat/completions`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/v1`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/v1/chat/completions`,
+    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai`,
+    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`,
+    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1/messages`]) {
     setConfig({ ...config(), upstream: { address } }); calls = [];
     const models = await run("/v1/models");
     assert.equal(models.response.headers.get("x-aelios-models"), "upstream", address);
-    assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/models`);
+    assert.equal(calls[0].url, catalog, address);
   }
 });
 
@@ -334,21 +348,45 @@ test("upstream forwards the panel Gateway ID", async () => {
   assert.equal(calls[0].headers["cf-aig-gateway-id"], "panel-gateway");
 });
 
+test("every CF paste form assembles chat/messages/responses from the same compat base", () => {
+  const acct = "d121aa7cd60ccebd6213c931efce41da";
+  const envLike = {} as any;
+  const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`;
+  const forms = [
+    acct,
+    acct.toUpperCase(),
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/models`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/chat/completions`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/messages`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/v1`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/compat/`,
+    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`,
+    `https://api.cloudflare.com/client/v4/accounts/${acct}/workers/scripts`
+  ];
+  for (const address of forms) {
+    const cfg = { version: 3 as const, upstream: { address }, identities: [] };
+    assert.equal(catalogUrl(envLike, cfg), `${compat}/models`, address);
+    assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), compat, address);
+    assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), compat, address);
+    assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), compat, address);
+  }
+});
+
 test("CF account ID puts the Gateway ID into the Unified compat URL for chat", () => {
   const acct = "b".repeat(32);
   const envLike = { AI_GATEWAY_ID: "my-gw" } as any;
   const cfg = { version: 3 as const, upstream: { address: acct }, identities: [] };
+  const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat`;
+  assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), compat);
+  assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), compat);
+  assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), compat);
+  assert.equal(catalogUrl(envLike, cfg), `${compat}/models`);
   assert.equal(
-    upstreamBaseUrl(envLike, cfg, "chat"),
-    `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat`
-  );
-  assert.equal(
-    upstreamBaseUrl(envLike, cfg, "messages"),
-    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`
-  );
-  assert.equal(
-    upstreamBaseUrl(envLike, { ...cfg, upstream: { address: `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1` } }, "chat"),
-    `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat`
+    catalogUrl(envLike, { ...cfg, upstream: { address: `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat/` } }),
+    `${compat}/models`
   );
 });
 
@@ -359,6 +397,22 @@ test("chat to a CF account uses the compat host, not the REST default gateway", 
   await run("/v1/chat/completions", { model: "custom-foo/bar", messages: [{ role: "user", content: "Hi" }] });
   assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${acct}/custom-gw/compat/chat/completions`);
   assert.equal(calls[0].headers["cf-aig-gateway-id"], "custom-gw");
+});
+
+test("the working compat URL keeps catalog on /models and shares that base for every protocol", async () => {
+  const acct = "d121aa7cd60ccebd6213c931efce41da";
+  const pasted = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/`;
+  const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`;
+  setConfig({ ...config(), upstream: { address: pasted } });
+  const models = await run("/v1/models");
+  assert.equal(models.response.headers.get("x-aelios-models"), "upstream");
+  assert.equal(calls[0].url, `${compat}/models`);
+  await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(calls[1].url, `${compat}/chat/completions`);
+  await run("/v1/messages", { model: "partner", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(calls[2].url, `${compat}/messages`);
+  await run("/v1/responses", { model: "partner", input: "Hi" });
+  assert.equal(calls[3].url, `${compat}/responses`);
 });
 
 test("settings edited in the admin page override deployment vars everywhere", async () => {
