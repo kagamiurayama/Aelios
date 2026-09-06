@@ -1,4 +1,4 @@
-import { object, type GatewayProfile, type Protocol } from "./config";
+import { object, type Identity, type Protocol } from "./config";
 
 export type Body = Record<string, any>;
 export function visibleText(content: unknown): string {
@@ -12,7 +12,7 @@ export function inputItems(body: Body, protocol: Protocol): Body[] {
   return body.messages;
 }
 export function validateBody(body: unknown, protocol: Protocol): asserts body is Body {
-  if (!object(body) || typeof body.model !== "string") throw new Error("A model alias is required");
+  if (!object(body) || typeof body.model !== "string") throw new Error("A model name is required");
   const items = inputItems(body, protocol);
   if (!Array.isArray(items) || !items.every(object)) throw new Error(protocol === "responses" ? "input must be a string or item array" : "messages must be an array of objects");
 }
@@ -44,12 +44,13 @@ export function appendMemory(body: Body, protocol: Protocol, patch: string): Bod
   else last.content = [...(last.content || []), { type: protocol === "responses" ? "input_text" : "text", text: patch }];
   return copy;
 }
-export function isStateful(body: Body, protocol: Protocol): boolean {
+// Encrypted reasoning stays allowed; only server-owned history breaks request-only memory.
+export function hasServerState(body: Body, protocol: Protocol): boolean {
   return protocol === "responses" && !!(body.previous_response_id || body.conversation ||
-    inputItems(body, protocol).some(item => item.type === "item_reference" || item.encrypted_content));
+    inputItems(body, protocol).some(item => item.type === "item_reference"));
 }
-export function applyThinkingPolicy(body: Body, profile: GatewayProfile, protocol: Protocol, headers: Headers): void {
-  if (protocol !== "messages" || profile.anthropicThinking !== "drop_block" || body.thinking?.type === "disabled") return;
+export function applyThinkingPolicy(body: Body, identity: Identity, protocol: Protocol, headers: Headers): void {
+  if (protocol !== "messages" || identity.anthropicThinking !== "drop_block" || body.thinking?.type === "disabled") return;
   body.thinking = { type: "adaptive", ...body.thinking,
     block_binding: { ...body.thinking?.block_binding, prefix_mismatch_behavior: "drop_block" } };
   const betas = new Set((headers.get("anthropic-beta") || "").split(",").map(s => s.trim()).filter(Boolean));

@@ -14,21 +14,34 @@ export interface Provider {
   headers?: Record<string, string>;
   secretHeaders?: Record<string, { secret: string; prefix?: string }>;
 }
-export interface Target { provider: string; model: string }
-export interface GatewayProfile {
-  alias: string;
+// Rules match the model the client asked for; the first match wins.
+export interface ModelRule {
+  match: string;
+  model?: string;
+  memory?: "request" | "off";
+  record?: boolean;
+}
+export interface Identity {
+  slug: string;
   namespace: string;
   keys: AuthResult["keyName"][];
-  routes: Partial<Record<Protocol, Target[]>>;
+  provider: string;
   memory: "request" | "off";
   record: boolean;
   anthropicThinking: "passthrough" | "drop_block";
   maxMemoryChars?: number;
+  models?: ModelRule[];
 }
 export interface GatewayConfig {
-  version: 1;
+  version: 2;
   providers: Record<string, Provider>;
-  profiles: GatewayProfile[];
+  identities: Identity[];
+}
+export interface ResolvedModel {
+  provider: string;
+  model: string;
+  memory: "request" | "off";
+  record: boolean;
 }
 export function object(value: unknown): value is Record<string, any> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -38,12 +51,15 @@ function check(condition: unknown, message: string): asserts condition {
 }
 const text = (v: unknown): v is string => typeof v === "string" && !!v.trim();
 const KEY_NAMES = ["CHATBOX_API_KEY", "IM_API_KEY", "DEBUG_API_KEY", "GUIDE_DOG_API_KEY"];
+// Slugs are the first path segment, so they cannot shadow existing entry points.
+const RESERVED_SLUGS = ["v1", "api", "admin", "health", "mcp", "memory-mcp", "memory-admin", "guide-dog"];
 
 export function validateConfig(value: unknown): GatewayConfig {
-  check(object(value) && value.version === 1, "Gateway config requires version: 1");
+  check(object(value) && value.version === 2, "Gateway config requires version: 2");
   check(object(value.providers), "providers must be an object");
   for (const [name, p] of Object.entries(value.providers)) {
-    check(text(name) && name.length <= 128 && object(p), "Invalid provider");
+    check(text(name) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(name) && object(p),
+      `Invalid provider name: ${name}. Use the name as the model prefix, so it must not contain a slash.`);
     check(Boolean(p.baseUrl) !== Boolean(p.gateway), `${name}: choose baseUrl or gateway`);
     if (p.baseUrl) {
       const url = new URL(p.baseUrl);
@@ -70,22 +86,29 @@ export function validateConfig(value: unknown): GatewayConfig {
       }
     }
   }
-  check(Array.isArray(value.profiles), "profiles must be an array");
-  const aliases = new Set<string>();
-  for (const p of value.profiles) {
-    check(object(p) && text(p.alias) && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(p.alias) && text(p.namespace) && p.namespace.length <= 128,
-      "Profile requires an ASCII model alias and namespace (max 128 characters)");
-    check(!aliases.has(p.alias), `Duplicate alias: ${p.alias}`);
-    aliases.add(p.alias);
-    check(Array.isArray(p.keys) && p.keys.length && p.keys.every((k: unknown) => KEY_NAMES.includes(String(k))), `${p.alias}: invalid keys`);
-    check(p.memory === "request" || p.memory === "off", `${p.alias}: memory must be request or off`);
-    check(typeof p.record === "boolean", `${p.alias}: record must be boolean`);
-    check(["passthrough", "drop_block"].includes(p.anthropicThinking), `${p.alias}: invalid anthropicThinking`);
-    check(p.maxMemoryChars === undefined || Number.isInteger(p.maxMemoryChars) && p.maxMemoryChars >= 256 && p.maxMemoryChars <= 24000, `${p.alias}: maxMemoryChars must be 256–24000`);
-    check(object(p.routes) && Object.keys(p.routes).length, `${p.alias}: routes required`);
-    for (const [protocol, targets] of Object.entries(p.routes)) {
-      check(PROTOCOLS.includes(protocol as Protocol) && Array.isArray(targets) && targets.length > 0 && targets.length <= 4, `${p.alias}: invalid routes`);
-      for (const t of targets) check(object(t) && text(t.model) && text(t.provider) && Object.hasOwn(value.providers, t.provider), `${p.alias}: invalid target`);
+  check(Array.isArray(value.identities), "identities must be an array");
+  const slugs = new Set<string>();
+  for (const identity of value.identities) {
+    check(object(identity) && text(identity.slug) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(identity.slug),
+      "Identity requires an ASCII slug used as the base URL path segment (max 64 characters)");
+    const where = identity.slug;
+    check(!RESERVED_SLUGS.includes(identity.slug.toLowerCase()), `${where}: reserved slug`);
+    check(!slugs.has(identity.slug), `Duplicate identity slug: ${where}`);
+    slugs.add(identity.slug);
+    check(text(identity.namespace) && identity.namespace.length <= 128, `${where}: namespace is required (max 128 characters)`);
+    check(Array.isArray(identity.keys) && identity.keys.length && identity.keys.every((k: unknown) => KEY_NAMES.includes(String(k))), `${where}: invalid keys`);
+    check(text(identity.provider) && Object.hasOwn(value.providers, identity.provider), `${where}: provider must name a configured provider`);
+    check(identity.memory === "request" || identity.memory === "off", `${where}: memory must be request or off`);
+    check(typeof identity.record === "boolean", `${where}: record must be boolean`);
+    check(["passthrough", "drop_block"].includes(identity.anthropicThinking), `${where}: invalid anthropicThinking`);
+    check(identity.maxMemoryChars === undefined || Number.isInteger(identity.maxMemoryChars) && identity.maxMemoryChars >= 256 && identity.maxMemoryChars <= 24000, `${where}: maxMemoryChars must be 256–24000`);
+    if (identity.models === undefined) continue;
+    check(Array.isArray(identity.models) && identity.models.length <= 64, `${where}: models must be an array of at most 64 rules`);
+    for (const rule of identity.models) {
+      check(object(rule) && text(rule.match) && rule.match.length <= 200, `${where}: every model rule needs a match pattern`);
+      check(rule.model === undefined || text(rule.model) && rule.model.length <= 200, `${where}: invalid model rewrite`);
+      check(rule.memory === undefined || rule.memory === "request" || rule.memory === "off", `${where}: rule memory must be request or off`);
+      check(rule.record === undefined || typeof rule.record === "boolean", `${where}: rule record must be boolean`);
     }
   }
   return value as unknown as GatewayConfig;
@@ -95,10 +118,34 @@ export async function loadConfig(env: Env): Promise<GatewayConfig> {
   const row = await env.DB.prepare("SELECT config_json FROM gateway_config WHERE id = 1").first<{ config_json: string }>();
   if (row) return validateConfig(JSON.parse(row.config_json));
   if (env.GATEWAY_CONFIG) return validateConfig(JSON.parse(env.GATEWAY_CONFIG));
-  return { version: 1, providers: {}, profiles: [] };
+  return { version: 2, providers: {}, identities: [] };
 }
-export function allowedProfiles(config: GatewayConfig, auth: AuthResult): GatewayProfile[] {
-  return config.profiles.filter(p => p.keys.includes(auth.keyName) && auth.profile.scopes.includes("chat:proxy"));
+export function allowedIdentities(config: GatewayConfig, auth: AuthResult): Identity[] {
+  if (!auth.profile.scopes.includes("chat:proxy")) return [];
+  return config.identities.filter(i => i.keys.includes(auth.keyName));
+}
+/** Without a path slug the key falls back to its first identity. */
+export function findIdentity(config: GatewayConfig, auth: AuthResult, slug: string | null): Identity | undefined {
+  const list = allowedIdentities(config, auth);
+  return slug ? list.find(i => i.slug === slug) : list[0];
+}
+export function matchGlob(pattern: string, value: string): boolean {
+  const source = pattern.split("*").map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+  return new RegExp(`^${source}$`, "i").test(value);
+}
+/** The first model segment picks the provider; the rest reaches the upstream untouched. */
+export function resolveModel(config: GatewayConfig, identity: Identity, requested: string): ResolvedModel {
+  const rule = (identity.models || []).find(r => matchGlob(r.match, requested));
+  const model = rule?.model || requested;
+  const slash = model.indexOf("/");
+  const prefix = slash > 0 ? model.slice(0, slash) : "";
+  const routed = prefix !== "" && Object.hasOwn(config.providers, prefix);
+  return {
+    provider: routed ? prefix : identity.provider,
+    model: routed ? model.slice(slash + 1) : model,
+    memory: rule?.memory ?? identity.memory,
+    record: rule?.record ?? identity.record
+  };
 }
 export function resolveSecret(env: Env, name: string): string {
   const secrets = env.GATEWAY_SECRETS ? JSON.parse(env.GATEWAY_SECRETS) : {};

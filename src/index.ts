@@ -12,7 +12,7 @@ import { handleVectorDoctor, handleVectorHealth, handleVectorReindex } from "./a
 import { handleDreamHarvest, handleDreamRun, handleDreamStatus } from "./api/dream";
 import { handleGateway } from "./gateway/handler";
 import { handleGatewayAdmin, gatewayAdminPage } from "./gateway/admin";
-import { loadConfig } from "./gateway/config";
+import { loadConfig, type Protocol } from "./gateway/config";
 import { handleGuideDogChatCompletions } from "./api/guideDog";
 import {
   handleGlossaryApi,
@@ -41,6 +41,20 @@ import type { Env, QueueMessage } from "./types";
 import { openAiError } from "./utils/json";
 
 const DAILY_MAINTENANCE_CRON = "10 20 * * *";
+
+const GATEWAY_ENDPOINTS: Record<string, Protocol> = {
+  "chat/completions": "chat",
+  messages: "messages",
+  responses: "responses"
+};
+
+/** Identities live in the first path segment: /<identity>/v1/... , or /v1/... for the key default. */
+export function gatewayRoute(pathname: string): { slug: string | null; endpoint: string } | null {
+  const parts = pathname.replace(/^\/+|\/+$/g, "").split("/");
+  const version = parts.indexOf("v1");
+  if (version < 0 || version > 1) return null;
+  return { slug: version === 1 ? parts[0] : null, endpoint: parts.slice(version + 1).join("/") };
+}
 
 function getDailyDigestNamespace(env: Env): string {
   return env.DREAM_NAMESPACE?.trim() || "default";
@@ -76,8 +90,20 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/admin/gateway") return gatewayAdminPage();
     if (url.pathname === "/api/gateway/config") return handleGatewayAdmin(request, env);
-    if (request.method === "POST" && url.pathname === "/v1/messages") return handleGateway(request, env, ctx, "messages");
-    if (request.method === "POST" && url.pathname === "/v1/responses") return handleGateway(request, env, ctx, "responses");
+
+    if (
+      request.method === "POST" &&
+      (url.pathname === "/v1/guide-dog/chat/completions" || url.pathname === "/guide-dog/v1/chat/completions")
+    ) {
+      return handleGuideDogChatCompletions(request, env);
+    }
+
+    const route = gatewayRoute(url.pathname);
+    if (route) {
+      const protocol = GATEWAY_ENDPOINTS[route.endpoint];
+      if (protocol && request.method === "POST") return handleGateway(request, env, ctx, protocol, route.slug);
+      if (route.endpoint === "models" && request.method === "GET") return handleModels(request, env, route.slug);
+    }
 
     if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/memory-admin")) {
       return handleAdmin();
@@ -109,21 +135,6 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/health") {
       return handleHealth(env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/v1/models") {
-      return handleModels(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
-      return handleGateway(request, env, ctx, "chat");
-    }
-
-    if (
-      request.method === "POST" &&
-      (url.pathname === "/v1/guide-dog/chat/completions" || url.pathname === "/guide-dog/v1/chat/completions")
-    ) {
-      return handleGuideDogChatCompletions(request, env);
     }
 
     if (url.pathname === "/mcp" || url.pathname === "/memory-mcp") {
@@ -233,7 +244,7 @@ export default {
       (async () => {
         const config = await loadConfig(env);
         const namespaces = [...new Set([getDailyDigestNamespace(env),
-          ...config.profiles.filter(p => p.record).map(p => p.namespace)])];
+          ...config.identities.filter(i => i.record || (i.models || []).some(r => r.record)).map(i => i.namespace)])];
         for (const namespace of namespaces) {
           try {
             const results: unknown[] = [];

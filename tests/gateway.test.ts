@@ -13,11 +13,11 @@ import { OutputCollector, observeResponse, persistExchange, prepareExchange, dis
 let sqlite: DatabaseSync;
 let db: any, env: any, ctx: any;
 let pending: Promise<unknown>[], calls: any[], queue: any[];
-const profile = () => ({ alias: "partner", namespace: "partner-a", keys: ["CHATBOX_API_KEY"],
-  memory: "request", record: true, anthropicThinking: "drop_block",
-  routes: { chat: [{ provider: "primary", model: "actual" }], messages: [{ provider: "primary", model: "claude-test" }], responses: [{ provider: "primary", model: "gpt-test" }] } });
-function config(profiles = [profile()]) {
-  return { version: 1, providers: { primary: { gateway: "default", provider: "compat" }, backup: { gateway: "backup", provider: "compat" } }, profiles };
+const identity = () => ({ slug: "partner", namespace: "partner-a", keys: ["CHATBOX_API_KEY"],
+  provider: "primary", memory: "request", record: true, anthropicThinking: "drop_block",
+  models: [{ match: "*haiku*", memory: "off", record: false }, { match: "listed-model" }] });
+function config(identities = [identity()]) {
+  return { version: 2, providers: { primary: { gateway: "default", provider: "compat" }, backup: { gateway: "backup", provider: "compat" } }, identities };
 }
 function setConfig(c: any) { env.GATEWAY_CONFIG = JSON.stringify(c); }
 beforeEach(() => {
@@ -109,15 +109,22 @@ test("append after multimodal blocks without modifying cache markers or original
   assert.equal(out.messages[0].content[2].text, "memory");
   assert.equal(classifyTurn({ messages: [{ role: "user", content: [{ type: "tool_result", content: "result" }, { type: "text", text: "Also do this" }] }] }, "messages").kind, "human");
 });
-test("identity keys filter model discovery and block namespace/model overrides", async () => {
-  setConfig(config([profile(), { ...profile(), alias: "other", namespace: "partner-b", keys: ["IM_API_KEY"] }]));
+test("path picks the identity; keys gate it and the bare path falls back to the first one", async () => {
+  const other = { ...identity(), slug: "other", namespace: "partner-b", keys: ["IM_API_KEY"] };
+  setConfig(config([identity(), other]));
   const models = await run("/v1/models");
-  assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["partner"]);
+  assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["listed-model"]);
   assert.match(models.response.headers.get("cache-control")!, /no-store/);
-  assert.equal((await run("/v1/chat/completions", { model: "other", messages: [] })).response.status, 403);
-  await run("/v1/chat/completions", { model: "partner", namespace: "partner-b", messages: [{ role: "user", content: "Hi" }] });
+  const scoped = await run("/partner/v1/chat/completions", { model: "any-model", messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(scoped.response.headers.get("x-aelios-identity"), "partner");
   assert.equal(queue[0].namespace, "partner-a");
-  assert.equal((await run("/v1/chat/completions", { model: "partner", messages: [] }, { authorization: "Bearer mcp-key" })).response.status, 403);
+  // Another key's identity stays unreachable, and a body namespace cannot override it.
+  assert.equal((await run("/other/v1/chat/completions", { model: "any-model", messages: [] })).response.status, 403);
+  await run("/v1/chat/completions", { model: "any-model", namespace: "partner-b", messages: [{ role: "user", content: "Hi again" }] });
+  assert.equal(queue[1].namespace, "partner-a");
+  const im = await run("/other/v1/chat/completions", { model: "any-model", messages: [{ role: "user", content: "Hi" }] }, { authorization: "Bearer im-key" });
+  assert.equal(im.response.headers.get("x-aelios-identity"), "other");
+  assert.equal((await run("/v1/chat/completions", { model: "any-model", messages: [] }, { authorization: "Bearer mcp-key" })).response.status, 403);
 });
 test("auxiliary and incomplete replies do not become Dream sources", async () => {
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Generate title" }] }, { "x-aelios-purpose": "auxiliary" });
@@ -128,24 +135,35 @@ test("auxiliary and incomplete replies do not become Dream sources", async () =>
 test("retry hashes ignore key order but distinguish later repeated words and sessions", async () => {
   const a = { model: "partner", messages: [{ role: "user", content: "Hi" }] };
   const b = { messages: [{ content: "Hi", role: "user" }], model: "partner" };
-  const make = (body: any, session = "one") => prepareExchange(request("/v1/chat/completions", body, { "x-aelios-session-id": session }), body, profile() as any, "chat", classifyTurn(body, "chat"), "chatbox");
+  const make = (body: any, session = "one") => prepareExchange(request("/v1/chat/completions", body, { "x-aelios-session-id": session }), body, identity() as any, "chat", classifyTurn(body, "chat"), "chatbox");
   assert.equal((await make(a)).id, (await make(b)).id);
   assert.notEqual((await make(a)).id, (await make(a, "two")).id);
   assert.notEqual((await make(a)).userId, (await make({ ...a, messages: [...a.messages, { role: "assistant", content: "Hello" }, ...a.messages] })).userId);
   assert.equal(canonical({ b: 1, a: 2 }), canonical({ a: 2, b: 1 }));
 });
-test("fallback happens before output; Responses stays on the first route", async () => {
-  const p = profile(); p.routes.chat.push({ provider: "backup", model: "alternate" }); p.routes.responses.push({ provider: "backup", model: "alternate" });
-  setConfig(config([p]));
-  env.AI.gateway = (id: string) => ({ async run(input: any) {
-    calls.push({ id, ...input });
-    return id === "default" ? new Response("busy", { status: 503 }) : Response.json({ choices: [{ index: 0, message: { content: "ok" }, finish_reason: "stop" }] });
-  } });
-  const chat = await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(chat.response.status, 200); assert.equal(calls.length, 2); assert.equal(calls[1].query.model, "alternate");
-  calls.length = 0;
-  const responses = await run("/v1/responses", { model: "partner", input: "Hi" });
-  assert.equal(responses.response.status, 503); assert.equal(calls.length, 1);
+test("model passthrough: first segment routes, rules rewrite, mute recall and recording", async () => {
+  precious("partner-a", "喜欢 Cloudflare");
+  setConfig(config([{ ...identity(), models: [
+    { match: "*haiku*", memory: "off", record: false },
+    { match: "cheap", model: "backup/moonshot/kimi-k2" }
+  ] }]));
+  const ask = (model: string) => run("/v1/chat/completions", { model, messages: [{ role: "user", content: "Hi " + model }] });
+  await ask("primary/gpt-9");
+  assert.deepEqual([calls[0].id, calls[0].query.model], ["default", "gpt-9"]);
+  // A configured provider name only ever eats one segment; the rest is the upstream's own naming.
+  await ask("backup/openai/gpt-9");
+  assert.deepEqual([calls[1].id, calls[1].query.model], ["backup", "openai/gpt-9"]);
+  // An unknown prefix is part of the model name, not a route.
+  await ask("openai/gpt-9");
+  assert.deepEqual([calls[2].id, calls[2].query.model], ["default", "openai/gpt-9"]);
+  await ask("cheap");
+  assert.deepEqual([calls[3].id, calls[3].query.model], ["backup", "moonshot/kimi-k2"]);
+  assert.equal(queue.length, 4);
+  const small = await ask("claude-3-5-haiku-20241022");
+  assert.equal(small.response.headers.get("x-aelios-memory"), "off");
+  assert.equal(calls[4].query.model, "claude-3-5-haiku-20241022");
+  assert.doesNotMatch(JSON.stringify(calls[4].query.messages), /Cloudflare/);
+  assert.equal(queue.length, 4);
 });
 test("SSE byte-exact Unicode and CRLF boundaries; no thinking in observed text", async () => {
   const raw = 'event: content_block_delta\r\ndata: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"secret"}}\r\n\r\n' +
@@ -177,7 +195,7 @@ test("cancellation cancels upstream and records interrupted state", async () => 
 test("admin configuration validation, D1 precedence and owner-only writes", async () => {
   assert.equal((await worker.fetch(request("/api/gateway/config", config(), {}, "PUT"), env, ctx)).status, 200);
   env.GATEWAY_CONFIG = "invalid env overridden by D1";
-  assert.equal(JSON.parse((await run("/api/gateway/config")).text).profiles[0].alias, "partner");
+  assert.equal(JSON.parse((await run("/api/gateway/config")).text).identities[0].slug, "partner");
   assert.equal((await worker.fetch(request("/api/gateway/config", config(), { authorization: "Bearer im-key" }, "PUT"), env, ctx)).status, 401);
   const bad = config(); (bad.providers.primary as any).headers = { authorization: "inline-secret" };
   assert.throws(() => validateConfig(bad), /secretHeaders/);
@@ -197,7 +215,7 @@ test("HTTP upstream receives configured secret only, preserving unknown fields a
 });
 test("thinking passthrough skips memory; explicit disabled thinking allows injection", async () => {
   precious("partner-a", "Cloudflare fan");
-  setConfig(config([{ ...profile(), anthropicThinking: "passthrough" }]));
+  setConfig(config([{ ...identity(), anthropicThinking: "passthrough" }]));
   const body = { model: "partner", messages: [{ role: "user", content: "Hi" }], thinking: { type: "adaptive" } };
   assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "thinking-passthrough");
   assert.deepEqual(calls[0].query.thinking, body.thinking); assert.deepEqual(calls[0].query.messages, body.messages);

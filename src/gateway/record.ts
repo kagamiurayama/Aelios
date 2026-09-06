@@ -1,7 +1,7 @@
 import type { Env } from "../types";
 import { sha256Hex } from "../utils/hash";
 import { getSseData, splitSseEvents } from "../utils/sseParser";
-import { object, type GatewayProfile, type Protocol } from "./config";
+import { object, type Identity, type Protocol } from "./config";
 import { canonical, inputItems, visibleText, type Body, type Turn } from "./protocol";
 
 // Two JSON-escaped text fields plus metadata fit within a Queue message.
@@ -24,17 +24,17 @@ export interface GatewayExchange {
   createdAt: string;
   stream: boolean;
 }
-export async function prepareExchange(request: Request, body: Body, profile: GatewayProfile,
+export async function prepareExchange(request: Request, body: Body, identity: Identity,
   protocol: Protocol, turn: Turn, source: string): Promise<GatewayExchange> {
   const session = request.headers.get("x-aelios-session-id") || request.headers.get("session_id") ||
     request.headers.get("x-session-id") || body.metadata?.session_id || "unscoped";
-  const scope = canonical([profile.namespace, profile.alias, source, session]);
+  const scope = canonical([identity.namespace, identity.slug, source, session]);
   const conversationId = "gw_" + await sha256Hex(scope);
   const prefix = inputItems(body, protocol).slice(0, turn.index + 1);
   const userId = "gw_user_" + await sha256Hex(canonical([scope, protocol, prefix]));
   const id = "gw_req_" + await sha256Hex(canonical([scope, protocol, turn.kind, body,
     request.headers.get("x-aelios-request-id") || ""]));
-  return { type: "gateway_exchange", id, userId, namespace: profile.namespace, profile: profile.alias,
+  return { type: "gateway_exchange", id, userId, namespace: identity.namespace, profile: identity.slug,
     conversationId, protocol, kind: turn.kind, userText: turn.text.slice(0, TEXT_LIMIT), assistantText: "",
     model: "", provider: "", httpStatus: 0, completion: turn.text.length > TEXT_LIMIT ? "truncated" : "incomplete",
     createdAt: new Date().toISOString(), stream: body.stream === true };
