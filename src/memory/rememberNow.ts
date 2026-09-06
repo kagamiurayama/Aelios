@@ -1,6 +1,7 @@
 import { upsertMemoryByFactKey } from "../db/v2";
 import type { Env } from "../types";
 import { sha256Hex } from "../utils/hash";
+import { upsertMemoryFts } from "./fts";
 
 const REMEMBER_RE = /^(?:请)?(?:帮我)?(?:记住|记一下)(?:一下|了)?[：:，,\s]*(.+)$/s;
 const REMEMBER_EN_RE = /^(?:please\s+)?remember(?:\s+that)?[：:\s]+(.+)$/is;
@@ -19,7 +20,7 @@ export function parseRememberNow(text: string): string | null {
 export async function captureRememberNow(
   env: Env,
   input: { namespace: string; userText: string; messageId?: string }
-): Promise<{ wrote: boolean; id?: string; content?: string }> {
+): Promise<{ wrote: boolean; indexed?: boolean; id?: string; content?: string }> {
   const content = parseRememberNow(input.userText);
   if (!content) return { wrote: false };
 
@@ -36,5 +37,10 @@ export async function captureRememberNow(
     sourceMessageIds: input.messageId ? [input.messageId] : [],
     authoredBy: "user"
   });
-  return { wrote: true, id: result.id, content };
+  const indexed = await upsertMemoryFts(env.DB, {
+    namespace: input.namespace,
+    memoryId: result.id,
+    content
+  });
+  return { wrote: true, indexed, id: result.id, content };
 }

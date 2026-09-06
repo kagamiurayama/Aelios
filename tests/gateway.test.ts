@@ -21,7 +21,12 @@ function config(identities = [identity()]) {
 function setConfig(c: any) { env.GATEWAY_CONFIG = JSON.stringify(c); }
 beforeEach(() => {
   sqlite?.close(); sqlite = new DatabaseSync(":memory:");
-  for (const file of readdirSync("migrations").filter(f => f.endsWith(".sql")).sort()) sqlite.exec(readFileSync("migrations/" + file, "utf8"));
+  for (const file of readdirSync("migrations").filter(f => f.endsWith(".sql")).sort()) {
+    try { sqlite.exec(readFileSync("migrations/" + file, "utf8")); }
+    catch (error) {
+      if (!String(error).includes("fts5")) throw error;
+    }
+  }
   db = { prepare(sql: string) {
     const statement = sqlite.prepare(sql); let args: any[] = [];
     const api = { bind(...values: any[]) { args = values; return api; },
@@ -296,11 +301,12 @@ test("a topical follow-up does not inject the previous relationship precious", a
 });
 
 test("please-remember writes the original words into long-term memory", async () => {
-  await run("/v1/chat/completions", {
+  const first = await run("/v1/chat/completions", {
     model: "partner",
     messages: [{ role: "user", content: "请记住调试暗号是芝麻开门" }]
   });
-  await persistExchange(env, queue[0]);
+  assert.match(first.response.headers.get("x-aelios-remember") || "", /saved|indexed/);
+  assert.match(first.response.headers.get("x-aelios-recall-id") || "", /^rcl_/);
   const row = sqlite.prepare("SELECT content, source, source_message_ids FROM memories").get() as {
     content: string;
     source: string;
@@ -309,6 +315,16 @@ test("please-remember writes the original words into long-term memory", async ()
   assert.equal(row.content, "调试暗号是芝麻开门");
   assert.equal(row.source, "remember_now");
   assert.match(row.source_message_ids, /gw_user_/);
+  const ask = await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [
+      { role: "user", content: "请记住调试暗号是芝麻开门" },
+      { role: "assistant", content: "好" },
+      { role: "user", content: "调试暗号是什么？" }
+    ]
+  });
+  assert.equal(ask.response.headers.get("x-aelios-memory"), "injected");
+  assert.match(JSON.stringify(calls[1].query.messages), /\[quote\].*芝麻开门|\[authored\].*芝麻开门/);
 });
 
 test("upstream forwards the panel Gateway ID", async () => {

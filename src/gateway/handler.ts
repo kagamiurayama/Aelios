@@ -2,53 +2,85 @@ import { authenticate } from "../auth/apiKey";
 import { markMemoriesInjected, listPrecious } from "../db/v2";
 import { recallInjectionBudget } from "../memory/filter";
 import { IMPRESSION_DISCLAIMER } from "../memory/impression";
-import { isPreciousRelevant, selectRelevantPrecious, shapeRecallQuery } from "../memory/queryShape";
+import { isEvidenceQuery, isPreciousRelevant, isTemporalQuery, selectRelevantPrecious, shapeRecallQuery } from "../memory/queryShape";
+import { formatQuote, quoteOverlaps, searchQuotes } from "../memory/quotes";
 import { assembleRecallSurface } from "../memory/surface";
 import { buildCoreFingerprint, runRecall } from "../memory/v2/recall";
 import type { Env } from "../types";
+import { newId } from "../utils/ids";
+import { nowIso } from "../utils/time";
 import { findIdentity, identityNamespace, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
 import { appendMemory, classifyTurn, hasServerState, recentHumanTexts, validateBody, type Body } from "./protocol";
-import { dispatchExchange, observeResponse, prepareExchange } from "./record";
+import { dispatchExchange, persistHumanUtterance, observeResponse, prepareExchange } from "./record";
 import { callGatewayUpstream } from "./upstream";
 
 export function gatewayError(protocol: Protocol, message: string, status: number): Response {
   const type = status === 401 ? "authentication_error" : status >= 500 ? "api_error" : "invalid_request_error";
   return Response.json(protocol === "messages" ? { type: "error", error: { type, message } } : { error: { type, message } }, { status });
 }
+
+function memoryKind(source: string | null | undefined, type: string, authoredBy?: string | null): string {
+  if (source === "remember_now" || authoredBy) return "authored";
+  if (source === "dream" || source === "judge" || source === "extract") return "distilled";
+  return type;
+}
+
 export async function recallPatch(
   env: Env,
   identity: Identity,
   query: string,
   ctx: ExecutionContext,
-  recent: string[] = []
+  recent: string[] = [],
+  options: { excludeMessageIds?: string[]; recallId?: string } = {}
 ): Promise<string> {
   const namespace = identityNamespace(identity);
+  const recallId = options.recallId ?? newId("rcl");
   const shaped = shapeRecallQuery({ query, recent });
   const budget = recallInjectionBudget(env);
+  const evidence = isEvidenceQuery(query);
+  const temporal = isTemporalQuery(query);
   if (budget.maxItems === 0) {
-    console.log("gateway recall decision", { identity: identity.slug, injected: 0, reason: "budget_zero" });
+    console.log("gateway recall decision", { recall_id: recallId, identity: identity.slug, injected: 0, reason: "budget_zero" });
     return "";
   }
 
   const precious = await listPrecious(env.DB, { namespace, limit: 80 });
   const relevantPrecious = selectRelevantPrecious(precious, shaped.lexicalTokens);
-  const recall = await runRecall(env, {
-    namespace,
-    query,
-    recent,
-    k: 12,
-    core_fingerprint: buildCoreFingerprint(relevantPrecious.map(p => p.content)),
-    skip_inject_mark: true,
-    waitUntil: promise => ctx.waitUntil(promise.catch(() => console.error("gateway recall accounting failed")))
-  });
-  const weekBlocks = recall.week_blocks.filter((block) =>
-    isPreciousRelevant(`${block.week} ${block.title} ${block.summary}`, shaped.lexicalTokens)
-  );
+  const [recall, quotes] = await Promise.all([
+    runRecall(env, {
+      namespace,
+      query,
+      recent,
+      k: 12,
+      core_fingerprint: buildCoreFingerprint(relevantPrecious.map(p => p.content)),
+      skip_inject_mark: true,
+      attach_week_blocks: temporal,
+      waitUntil: promise => ctx.waitUntil(promise.catch(() => console.error("gateway recall accounting failed")))
+    }),
+    searchQuotes(env.DB, {
+      namespace,
+      query,
+      tokens: shaped.lexicalTokens,
+      limit: evidence ? 4 : 2,
+      excludeIds: options.excludeMessageIds
+    })
+  ]);
+
+  const weekBlocks = temporal
+    ? recall.week_blocks.filter((block) =>
+      isPreciousRelevant(`${block.week} ${block.title} ${block.summary}`, shaped.lexicalTokens)
+    )
+    : [];
+
+  const quoteEntries = quotes.map((hit) => ({ kind: "quote", content: formatQuote(hit), id: hit.id }));
+  const regularHits = recall.hits.filter((hit) => !quotes.some((quote) => quoteOverlaps(hit.content, quote.content)));
   const assembled = assembleRecallSurface([
+    ...(evidence ? quoteEntries : []),
     ...relevantPrecious.map(p => ({ kind: "precious", content: p.content, id: p.id })),
     ...recall.glossary_hits.map(p => ({ kind: "glossary", content: `${p.term}: ${p.definition}` })),
-    ...recall.hits.map(p => ({ kind: p.type, content: p.content, id: p.id })),
-    ...weekBlocks.map(p => ({ kind: "week", content: `${IMPRESSION_DISCLAIMER} ${p.week}: ${p.summary}` }))
+    ...regularHits.map(p => ({ kind: memoryKind(p.source, p.type, p.authored_by), content: p.content, id: p.id })),
+    ...(!evidence ? quoteEntries : []),
+    ...weekBlocks.map(p => ({ kind: "impression", content: `${IMPRESSION_DISCLAIMER} ${p.week}: ${p.summary}` }))
   ], {
     budget: identity.maxMemoryChars || 6000,
     maxItems: budget.maxItems,
@@ -56,7 +88,7 @@ export async function recallPatch(
   });
 
   const injectedMemoryIds = assembled.entries
-    .filter((entry) => entry.id && entry.kind !== "precious" && entry.kind !== "glossary" && entry.kind !== "week")
+    .filter((entry) => entry.id && entry.kind !== "precious" && entry.kind !== "glossary" && entry.kind !== "week" && entry.kind !== "quote" && entry.kind !== "impression")
     .map((entry) => entry.id!);
   if (injectedMemoryIds.length > 0) {
     ctx.waitUntil(
@@ -65,16 +97,32 @@ export async function recallPatch(
     );
   }
 
-  console.log("gateway recall decision", {
+  const explain = {
+    recall_id: recallId,
     identity: identity.slug,
     query: query.slice(0, 80),
     thin: shaped.thin,
-    precious_selected: relevantPrecious.length,
-    regular_hits: recall.hits.length,
-    week_blocks: weekBlocks.length,
+    evidence,
+    channels: {
+      precious_selected: relevantPrecious.length,
+      quotes: quotes.length,
+      regular_hits: regularHits.length,
+      week_blocks: weekBlocks.length,
+      dropped_as_quote_dup: recall.hits.length - regularHits.length
+    },
     injected: assembled.entries.length,
-    kinds: assembled.entries.map((entry) => entry.kind)
-  });
+    kinds: assembled.entries.map((entry) => entry.kind),
+    budget: { maxItems: budget.maxItems, maxChars: budget.maxChars }
+  };
+  console.log("gateway recall decision", explain);
+  ctx.waitUntil(
+    env.DB.prepare(
+      `INSERT INTO memory_events (id, namespace, event_type, memory_id, payload_json, created_at)
+       VALUES (?, ?, 'recall_explain', NULL, ?, ?)`
+    ).bind(recallId, namespace, JSON.stringify(explain), nowIso())
+      .run()
+      .catch(() => console.error("gateway recall explain persist failed"))
+  );
   return assembled.text;
 }
 export async function handleGateway(request: Request, env: Env, ctx: ExecutionContext,
@@ -101,11 +149,26 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
   const turn = classifyTurn(body, protocol, request.headers.get("x-aelios-purpose") === "auxiliary");
   let patch = "";
   let memoryStatus = !main ? "off" : turn.kind !== "human" ? "skipped" : "empty";
+  let rememberStatus = "none";
+  const recallId = newId("rcl");
   const thinkingCompatible = protocol !== "messages" || identity.anthropicThinking === "drop_block" || body.thinking?.type === "disabled";
+  const exchange = main ? await prepareExchange(request, body, identity, protocol, turn, auth.profile.source) : null;
+  if (exchange && main && turn.kind === "human" && turn.text) {
+    try {
+      const captured = await persistHumanUtterance(env, exchange);
+      if (captured.remember.wrote) rememberStatus = captured.remember.indexed ? "indexed" : "saved";
+    } catch (error) {
+      rememberStatus = "failed";
+      console.error("gateway human utterance persist failed", { identity: identity.slug, error });
+    }
+  }
   if (main && turn.kind === "human" && turn.text && thinkingCompatible) {
     try {
       const prior = recentHumanTexts(body, protocol).slice(0, -1).slice(-3);
-      patch = await recallPatch(env, identity, turn.text, ctx, prior);
+      patch = await recallPatch(env, identity, turn.text, ctx, prior, {
+        excludeMessageIds: exchange ? [exchange.userId] : [],
+        recallId
+      });
       memoryStatus = patch ? "injected" : "empty";
     }
     catch (error) {
@@ -115,12 +178,13 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
   } else if (!thinkingCompatible && main) memoryStatus = "thinking-passthrough";
   const payload = appendMemory(body, protocol, patch);
   if (protocol === "responses" && main) payload.store = false;
-  const exchange = main ? await prepareExchange(request, body, identity, protocol, turn, auth.profile.source) : null;
   try {
     const upstream = await callGatewayUpstream(env, config, identity, protocol, request, payload);
     const headers = new Headers(upstream.headers);
     headers.set("x-aelios-identity", identity.slug);
     headers.set("x-aelios-memory", memoryStatus);
+    headers.set("x-aelios-recall-id", recallId);
+    headers.set("x-aelios-remember", rememberStatus);
     headers.set("x-aelios-provider", upstream.headers.get("cf-aig-provider") || "");
     headers.set("x-aelios-model", upstream.headers.get("cf-aig-model") || body.model);
     headers.set("cache-control", "no-store");

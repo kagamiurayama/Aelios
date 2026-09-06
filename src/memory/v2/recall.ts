@@ -330,6 +330,8 @@ export interface RecallInput {
   waitUntil?: (promise: Promise<unknown>) => void;
   // Gateway applies the unified surface budget first, then marks only those ids.
   skip_inject_mark?: boolean;
+  // Week diaries are impressions, not evidence. Only attach when the question is temporal.
+  attach_week_blocks?: boolean;
 }
 
 export interface RecallHit {
@@ -547,7 +549,7 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
 
   // 7. #35 周块附带。失败不影响召回主体，吞掉记日志。
   let weekBlocks: RecallWeekBlock[] = [];
-  if (isWeekBlockEnabled(env) && allHits.length > 0) {
+  if (isWeekBlockEnabled(env) && allHits.length > 0 && input.attach_week_blocks !== false) {
     try {
       weekBlocks = await collectWeekBlocks(env, {
         namespace: input.namespace,

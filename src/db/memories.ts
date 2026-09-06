@@ -1,4 +1,5 @@
 import type { MemoryLifecycleRow, MemoryRecord } from "../types";
+import { searchFtsIds } from "../memory/fts";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 
@@ -367,7 +368,15 @@ export async function searchMemoriesByText(
     clauses.push("(content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')");
     binds.push(like, like);
   }
-  if (clauses.length > 0) {
+  const ftsIds = tokens.length > 0
+    ? await searchFtsIds(db, "memory_fts", "memory_id", { namespace: input.namespace, tokens, limit: input.limit })
+    : [];
+  if (ftsIds.length > 0) {
+    sql += ` AND (id IN (${ftsIds.map(() => "?").join(", ")})`;
+    binds.push(...ftsIds);
+    if (clauses.length > 0) sql += ` OR (${clauses.join(" OR ")})`;
+    sql += ")";
+  } else if (clauses.length > 0) {
     sql += ` AND (${clauses.join(" OR ")})`;
   }
 

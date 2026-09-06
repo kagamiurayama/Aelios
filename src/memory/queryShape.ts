@@ -54,6 +54,41 @@ export function tokenizeQuery(text: string): string[] {
   return [...tokens].slice(0, 12);
 }
 
+export function tokenizeForIndex(text: string, limit = 40): string[] {
+  const tokens = new Set<string>();
+  const norm = text.toLowerCase();
+
+  for (const word of norm.split(/[^a-z0-9\u4e00-\u9fff]+/)) {
+    if (word.length >= 2 && !STOP.has(word)) tokens.add(word);
+  }
+
+  const chars = [...norm].filter((ch) => /[\u4e00-\u9fff]/.test(ch));
+  for (let i = 0; i < chars.length - 1; i++) {
+    if (CJK_FUNC.test(chars[i]) || CJK_FUNC.test(chars[i + 1])) continue;
+    tokens.add(chars[i] + chars[i + 1]);
+  }
+
+  for (const run of norm.match(/[\u4e00-\u9fff]{2,8}/g) ?? []) {
+    if (STOP.has(run)) continue;
+    if (CJK_FUNC.test(run[0]) || CJK_FUNC.test(run[run.length - 1])) continue;
+    tokens.add(run);
+  }
+
+  for (const code of norm.match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) ?? []) {
+    if (code.length >= 2 && !STOP.has(code)) tokens.add(code);
+  }
+
+  return [...tokens].slice(0, limit);
+}
+
+export function isEvidenceQuery(query: string): boolean {
+  return /暗号|口令|原话|说过|怎么说的|哪天|几号|什么时候|何时|日期|passphrase|said|quote|when did|what did/i.test(query);
+}
+
+export function isTemporalQuery(query: string): boolean {
+  return /这周|上周|本周|那周|最近一周|周记|这个月|上个月|日记|那天发生|这一周/i.test(query);
+}
+
 export function isThinQuery(query: string): boolean {
   const q = query.trim();
   if (!q) return true;

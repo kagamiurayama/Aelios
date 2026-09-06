@@ -1,4 +1,5 @@
 import { upsertMemoryEmbedding } from "../../memory/embedding";
+import { upsertMemoryFts } from "../../memory/fts";
 import { clampMemoryType } from "../../memory/canonicalTypes";
 import type {
   Env,
@@ -238,6 +239,7 @@ export async function upsertMemoryByFactKey(
       .bind(input.factKey, input.validAsOf ?? null, now, existing.id)
       .run();
     await syncMemoryVector(env, { namespace: input.namespace, id: existing.id });
+    await upsertMemoryFts(env.DB, { namespace: input.namespace, memoryId: existing.id, content: input.content });
     return { id: existing.id, created: false };
   }
 
@@ -281,6 +283,7 @@ export async function upsertMemoryByFactKey(
     .run();
 
   await syncMemoryVector(env, { namespace: input.namespace, id });
+  await upsertMemoryFts(env.DB, { namespace: input.namespace, memoryId: id, content: input.content });
   return { id, created: true };
 }
 

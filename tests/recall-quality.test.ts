@@ -14,6 +14,8 @@ import { filterAndCompressMemoriesWithMeta } from "../src/memory/filter";
 import { formatDreamCursor, readDailyCursor } from "../src/memory/dreamDates";
 import { listMessagesByNamespaceInRange } from "../src/db/messages";
 import { parseRememberNow } from "../src/memory/rememberNow";
+import { formatQuote, searchQuotes } from "../src/memory/quotes";
+import { isEvidenceQuery, isTemporalQuery, tokenizeForIndex } from "../src/memory/queryShape";
 import { searchMemoriesByText } from "../src/db/memories";
 import { recentHumanTexts } from "../src/gateway/protocol";
 
@@ -237,6 +239,43 @@ test("same-timestamp messages are not skipped after a mid-batch cut", async () =
     readDailyCursor(cursor, "2026-09-06T00:00:00.000Z", "2026-09-07T00:00:00.000Z"),
     { done: false, after: ts, afterId: "msg_a" }
   );
+  sqlite.close();
+});
+
+test("project names and codes stay in the index tokenizer", () => {
+  const tokens = tokenizeForIndex("月亮邮局-0906 的暗号");
+  assert.ok(tokens.some((token) => token.includes("月亮") || token.includes("邮局")));
+  assert.ok(tokens.includes("0906"));
+  assert.equal(isEvidenceQuery("调试暗号是什么？"), true);
+  assert.equal(isEvidenceQuery("帮我写一段配置"), false);
+  assert.equal(isTemporalQuery("上周日记写了什么"), true);
+});
+
+test("raw utterances are searchable before they become facts", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
+    source TEXT, created_at TEXT
+  )`);
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+    "msg_1", "c", "ns", "user", "请记住调试暗号是芝麻开门", "gw", "2026-09-06T12:00:00.000Z"
+  );
+  const db = {
+    prepare(sql: string) {
+      const statement = sqlite.prepare(sql);
+      let args: unknown[] = [];
+      const api = {
+        bind(...values: unknown[]) { args = values; return api; },
+        async all() { return { results: statement.all(...args) }; },
+        async first() { return statement.get(...args) || null; },
+        async run() { return { meta: { changes: statement.run(...args).changes } }; }
+      };
+      return api;
+    }
+  };
+  const hits = await searchQuotes(db as any, { namespace: "ns", query: "调试暗号是什么？" });
+  assert.ok(hits.some((hit) => hit.content.includes("芝麻开门")));
+  assert.match(formatQuote(hits[0]), /2026-09-06 用户: 「请记住调试暗号是芝麻开门」/);
   sqlite.close();
 });
 

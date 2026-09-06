@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import { upsertMessageFts } from "../memory/fts";
 import { captureRememberNow } from "../memory/rememberNow";
 import { sha256Hex } from "../utils/hash";
 import { getSseData, splitSseEvents } from "../utils/sseParser";
@@ -67,6 +68,18 @@ export async function persistExchange(env: Env, e: GatewayExchange): Promise<voi
     if (e.completion === "complete" && e.assistantText) addMessage(e.id + ":assistant", "assistant", e.assistantText);
   }
   await env.DB.batch(statements);
+  if (e.kind !== "auxiliary") {
+    if (e.kind === "human" && e.userText && e.completion !== "truncated") {
+      await upsertMessageFts(env.DB, { namespace: e.namespace, messageId: e.userId, content: e.userText });
+    }
+    if (e.completion === "complete" && e.assistantText) {
+      await upsertMessageFts(env.DB, {
+        namespace: e.namespace,
+        messageId: e.id + ":assistant",
+        content: e.assistantText
+      });
+    }
+  }
   if (e.kind === "human" && e.userText && e.completion !== "truncated") {
     try {
       const remembered = await captureRememberNow(env, {
@@ -75,12 +88,51 @@ export async function persistExchange(env: Env, e: GatewayExchange): Promise<voi
         messageId: e.userId
       });
       if (remembered.wrote) {
-        console.log("remember-now wrote memory", { namespace: e.namespace, id: remembered.id });
+        console.log("remember-now wrote memory", {
+          namespace: e.namespace,
+          id: remembered.id,
+          indexed: remembered.indexed === true
+        });
       }
     } catch (error) {
       console.error("remember-now failed", { namespace: e.namespace, error });
     }
   }
+}
+
+export async function persistHumanUtterance(
+  env: Env,
+  e: GatewayExchange
+): Promise<{ saved: boolean; indexed: boolean; remember: { wrote: boolean; indexed?: boolean; id?: string } }> {
+  if (e.kind !== "human" || !e.userText || e.completion === "truncated") {
+    return { saved: false, indexed: false, remember: { wrote: false } };
+  }
+  await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO conversations (id, namespace, created_at, updated_at) VALUES (?, ?, ?, ?)`)
+      .bind(e.conversationId, e.namespace, e.createdAt, e.createdAt),
+    env.DB.prepare(`INSERT OR IGNORE INTO messages
+      (id, conversation_id, namespace, role, content, source, client_message_hash, upstream_model,
+       upstream_provider, request_model, stream, finish_reason, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(e.userId, e.conversationId, e.namespace, "user", e.userText, "gateway:" + e.profile, e.userId,
+        e.model, e.provider, e.profile, e.stream ? 1 : 0, e.completion, e.createdAt)
+  ]);
+  const indexed = await upsertMessageFts(env.DB, {
+    namespace: e.namespace,
+    messageId: e.userId,
+    content: e.userText
+  });
+  let remember: { wrote: boolean; indexed?: boolean; id?: string } = { wrote: false };
+  try {
+    remember = await captureRememberNow(env, {
+      namespace: e.namespace,
+      userText: e.userText,
+      messageId: e.userId
+    });
+  } catch (error) {
+    console.error("remember-now failed", { namespace: e.namespace, error });
+  }
+  return { saved: true, indexed, remember };
 }
 export async function dispatchExchange(env: Env, exchange: GatewayExchange): Promise<void> {
   if (env.MEMORY_QUEUE) {
