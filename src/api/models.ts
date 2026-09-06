@@ -26,7 +26,8 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
       const upstream = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: request.signal });
       if (upstream.ok) return new Response(upstream.body, { status: 200, headers: {
         "content-type": upstream.headers.get("content-type") || "application/json",
-        "cache-control": "private, no-store", "x-aelios-identity": identity.slug } });
+        "cache-control": "private, no-store", "x-aelios-identity": identity.slug,
+        "x-aelios-models": "upstream" } });
     } catch { /* fall through to local hints */ }
   }
   return json(
@@ -36,6 +37,6 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
         .filter(model => !model.includes("*"))
         .map(model => ({ id: model, object: "model", created: 0, owned_by: identity.slug }))
     },
-    { headers: { "Cache-Control": "private, no-store" } }
+    { headers: { "Cache-Control": "private, no-store", "x-aelios-models": "fallback" } }
   );
 }

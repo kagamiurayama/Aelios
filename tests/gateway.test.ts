@@ -130,6 +130,7 @@ test("path picks the identity; keys gate it and the bare path falls back to the 
   assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["anthropic/claude-opus-4-5"]);
   assert.equal(calls[0].url, "https://upstream.test/ai/v1/models");
   assert.equal(calls[0].headers.authorization, "Bearer cf-token");
+  assert.equal(models.response.headers.get("x-aelios-models"), "upstream");
   assert.match(models.response.headers.get("cache-control")!, /no-store/);
   const scoped = await run("/partner/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
   assert.equal(scoped.response.headers.get("x-aelios-identity"), "partner");
@@ -148,6 +149,7 @@ test("model catalog falls back to main-model hints when the upstream cannot answ
   try {
     const models = await run("/v1/models");
     assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
+    assert.equal(models.response.headers.get("x-aelios-models"), "fallback");
   } finally { globalThis.fetch = mock; }
   delete env.CLOUDFLARE_API_TOKEN;
   const offline = await run("/v1/models");
