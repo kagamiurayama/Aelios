@@ -315,6 +315,26 @@ test("a topical follow-up does not inject the previous relationship precious", a
   assert.doesNotMatch(JSON.stringify(calls[0].query.messages), /Aelios memory reference|关系记忆|喜欢 Cloudflare/);
 });
 
+test("remember probes and recollection questions do not become facts", async () => {
+  await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "记住了吗？" }] });
+  await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "remember when we talked about the project?" }] });
+  await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [{ role: "user", content: "请记住：暗号是芝麻开门。只回复三个字：记住了" }]
+  });
+  const rows = sqlite.prepare("SELECT content, type, tags, authored_by FROM memories").all() as Array<{
+    content: string;
+    type: string;
+    tags: string;
+    authored_by: string | null;
+  }>;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].content, "暗号是芝麻开门");
+  assert.equal(rows[0].type, "note");
+  assert.match(rows[0].tags, /verbatim/);
+  assert.equal(rows[0].authored_by, null);
+});
+
 test("please-remember writes the original words into long-term memory", async () => {
   const first = await run("/v1/chat/completions", {
     model: "partner",

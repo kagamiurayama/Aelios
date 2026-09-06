@@ -3,10 +3,13 @@ import type { MessageRecord } from "../types";
 import { searchFtsIds } from "./fts";
 import { isPreciousRelevant, lexicalOverlapScore, tokenizeForIndex } from "./queryShape";
 
+export const QUOTE_EXCERPT_CHARS = 280;
+
 export interface QuoteHit {
   id: string;
   role: "user" | "assistant" | string;
   content: string;
+  excerpt: string;
   created_at: string;
   conversation_id: string;
   score: number;
@@ -14,6 +17,49 @@ export interface QuoteHit {
 
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+export function excerptAroundMatch(
+  content: string,
+  tokens: string[],
+  maxLen = QUOTE_EXCERPT_CHARS
+): string {
+  const text = content.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= maxLen) return text;
+
+  const lower = text.toLowerCase();
+  let hit = -1;
+  let hitLen = 0;
+  for (const token of tokens) {
+    const needle = token.trim().toLowerCase();
+    if (needle.length < 2) continue;
+    const idx = lower.indexOf(needle);
+    if (idx >= 0 && (hit < 0 || idx < hit)) {
+      hit = idx;
+      hitLen = needle.length;
+    }
+  }
+  if (hit < 0) return text.slice(0, maxLen);
+
+  const window = Math.max(maxLen - hitLen, 32);
+  const before = Math.min(Math.floor(window / 3), hit);
+  let start = hit - before;
+  if (start + maxLen > text.length) start = Math.max(0, text.length - maxLen);
+  const chunk = text.slice(start, start + maxLen);
+  return `${start > 0 ? "…" : ""}${chunk}${start + chunk.length < text.length ? "…" : ""}`;
+}
+
+function toQuoteHit(row: MessageRecord, tokens: string[]): QuoteHit {
+  return {
+    id: row.id,
+    role: row.role,
+    content: row.content,
+    excerpt: excerptAroundMatch(row.content, tokens),
+    created_at: row.created_at,
+    conversation_id: row.conversation_id,
+    score: lexicalOverlapScore(row.content, tokens)
+  };
 }
 
 async function searchQuotesLike(
@@ -37,14 +83,7 @@ async function searchQuotesLike(
 
   return (result.results ?? [])
     .filter((row) => !input.excludeIds.has(row.id))
-    .map((row) => ({
-      id: row.id,
-      role: row.role,
-      content: row.content,
-      created_at: row.created_at,
-      conversation_id: row.conversation_id,
-      score: lexicalOverlapScore(row.content, tokens)
-    }))
+    .map((row) => toQuoteHit(row, tokens))
     .filter((row) => row.score > 0 && isPreciousRelevant(row.content, tokens))
     .sort((a, b) => b.score - a.score || b.created_at.localeCompare(a.created_at));
 }
@@ -70,14 +109,7 @@ export async function searchQuotes(
   const fromFts = ftsIds.length
     ? (await getMessagesByIds(db, { namespace: input.namespace, ids: ftsIds }))
       .filter((row) => !excludeIds.has(row.id) && (row.role === "user" || row.role === "assistant"))
-      .map((row) => ({
-        id: row.id,
-        role: row.role,
-        content: row.content,
-        created_at: row.created_at,
-        conversation_id: row.conversation_id,
-        score: lexicalOverlapScore(row.content, tokens)
-      }))
+      .map((row) => toQuoteHit(row, tokens))
       .filter((row) => row.score > 0 && isPreciousRelevant(row.content, tokens))
     : [];
 
@@ -96,7 +128,8 @@ function clusterQuotes(hits: QuoteHit[], limit: number): QuoteHit[] {
   for (const hit of hits.sort((a, b) => b.score - a.score || b.created_at.localeCompare(a.created_at))) {
     const duplicate = kept.some((other) =>
       other.conversation_id === hit.conversation_id
-      && (other.content.includes(hit.content) || hit.content.includes(other.content))
+      && (other.excerpt.includes(hit.excerpt) || hit.excerpt.includes(other.excerpt)
+        || other.content.includes(hit.content) || hit.content.includes(other.content))
     );
     if (duplicate) continue;
     kept.push(hit);
@@ -108,7 +141,7 @@ function clusterQuotes(hits: QuoteHit[], limit: number): QuoteHit[] {
 export function formatQuote(hit: QuoteHit): string {
   const day = hit.created_at.slice(0, 10);
   const speaker = hit.role === "assistant" ? "助手" : "用户";
-  const quote = hit.content.replace(/\s+/g, " ").trim().slice(0, 280);
+  const quote = (hit.excerpt || excerptAroundMatch(hit.content, [])).replace(/\s+/g, " ").trim();
   return `${day} ${speaker}: 「${quote}」`;
 }
 

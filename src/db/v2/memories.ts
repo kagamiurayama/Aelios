@@ -1,5 +1,5 @@
 import { upsertMemoryEmbedding } from "../../memory/embedding";
-import { upsertMemoryFts } from "../../memory/fts";
+import { deleteFtsRow, upsertMemoryFts } from "../../memory/fts";
 import { clampMemoryType } from "../../memory/canonicalTypes";
 import type {
   Env,
@@ -486,6 +486,7 @@ export async function supersedeMemory(
       .bind(nextId, input.namespace, newFactKey, input.reason ?? null, input.validAsOf ?? null, now)
       .run();
     await syncMemoryVector(env, { namespace: input.namespace, id: nextId });
+    await upsertMemoryFts(env.DB, { namespace: input.namespace, memoryId: nextId, content: input.newContent });
     return { oldStatus: "missing", newId: nextId };
   }
 
@@ -556,6 +557,7 @@ export async function supersedeMemory(
 
   // 3. 同步向量：新条目 upsert，旧条目下架
   await syncMemoryVector(env, { namespace: input.namespace, id: nextId });
+  await upsertMemoryFts(env.DB, { namespace: input.namespace, memoryId: nextId, content: input.newContent });
   if (old.vector_id) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -641,6 +643,7 @@ export async function archiveMemory(
     .prepare("UPDATE memories SET status = 'archived', updated_at = ? WHERE namespace = ? AND id = ?")
     .bind(now, input.namespace, input.id)
     .run();
+  await deleteFtsRow(db, "memory_fts", "memory_id", input.id);
 
   if (existing.vector_id) {
     try {
@@ -680,6 +683,7 @@ export async function deleteMemoryV2(
     .prepare("DELETE FROM memories WHERE namespace = ? AND id = ?")
     .bind(input.namespace, input.id)
     .run();
+  await deleteFtsRow(db, "memory_fts", "memory_id", input.id);
   return true;
 }
 

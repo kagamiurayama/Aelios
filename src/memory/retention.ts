@@ -10,6 +10,7 @@ import {
   writeCursor,
   RETENTION_BATCH_SIZE,
 } from "../db/retention";
+import { deleteFtsRow } from "./fts";
 import type { Env } from "../types";
 import { readPositiveInt } from "../utils/request";
 
@@ -97,6 +98,11 @@ export async function runMemoryRetention(
   // 5. Expire old active memories and sync Vectorize
   const expireResult = await expireOldMemories(env.DB, namespace, daysAgo(MEMORY_ACTIVE_EXPIRY_DAYS));
   stats.expiredMemories = expireResult.count;
+  if (expireResult.expired.length > 0) {
+    for (const memory of expireResult.expired) {
+      await deleteFtsRow(env.DB, "memory_fts", "memory_id", memory.id);
+    }
+  }
 
   // 5a. Sync Vectorize: remove vectors for newly expired memories
   if (env.VECTORIZE && expireResult.expired.length > 0) {

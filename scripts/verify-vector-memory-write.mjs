@@ -195,7 +195,11 @@ assert.doesNotMatch(dbV2Source, /input\.newType \?\? "world_fact"/);
 assert.match(digestSource, /memories_to_add 默认给空数组/);
 assert.doesNotMatch(digestSource, /for \(const memory of digest\.memories_to_add \?\? \[\]\) \{\s+const factKey/s);
 assert.doesNotMatch(digestSource, /added \+= 0/);
-assert.match(candidateJudgeSource, /judgeResult\.score >= approveMin && judgeResult\.grounded && judgeResult\.durable/);
-assert.match(candidateJudgeSource, /judgeResult\.score <= discardMax \|\| !judgeResult\.grounded \|\| !judgeResult\.durable/);
+assert.match(candidateJudgeSource, /export function decideJudge/);
+assert.match(candidateJudgeSource, /source === "dream_delete"/);
+assert.match(candidateJudgeSource, /parseJudgeBoolean/);
+assert.match(candidateJudgeSource, /shouldDelete === true && result\.score >= thresholds\.approveMin/);
+assert.match(candidateJudgeSource, /normalized === "false"/);
+assert.doesNotMatch(candidateJudgeSource, /grounded: Boolean\(obj\.grounded\)/);
 
 console.log("verify-vector-memory-write: all checks passed");

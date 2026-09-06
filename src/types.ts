@@ -227,6 +227,8 @@ export interface MessageRecord {
   content: string;
   source: string | null;
   created_at: string;
+  /** Turn-local order. Hash IDs are unique only; same-timestamp rows sort by seq. */
+  seq?: number;
 }
 
 export type MemoryVersionStatus = "current" | "superseded" | "under_review";

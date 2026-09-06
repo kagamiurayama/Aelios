@@ -31,6 +31,7 @@ import { handleModels } from "./api/models";
 import { handleRelationsGraph } from "./api/relations";
 import { runCandidateJudge } from "./memory/candidateJudge";
 import { runDailyMemoryDigest, runDreamBackfill } from "./memory/dailyDigest";
+import { backfillFts } from "./memory/fts";
 import {
   runDiaryTrigger,
   runGithubDailyTrigger,
@@ -304,6 +305,19 @@ export default {
             ]);
             results.push({ type: "retention", result: retentionResult });
             results.push({ type: "github_daily", result: githubResult });
+
+            try {
+              results.push({
+                type: "fts_backfill",
+                result: await backfillFts(env.DB, { namespace, limit: 400 })
+              });
+            } catch (error) {
+              console.error("scheduled fts backfill failed", {
+                namespace,
+                error: error instanceof Error ? error.message : String(error)
+              });
+              results.push({ type: "fts_backfill", result: { ok: false, error: String(error) } });
+            }
 
             let weeklyRollup: Awaited<ReturnType<typeof runWeeklyRollupTrigger>> | undefined;
             try {

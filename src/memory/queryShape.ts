@@ -54,9 +54,8 @@ export function tokenizeQuery(text: string): string[] {
   return [...tokens].slice(0, 12);
 }
 
-export function tokenizeForIndex(text: string, limit = 40): string[] {
+function collectIndexTokens(norm: string): string[] {
   const tokens = new Set<string>();
-  const norm = text.toLowerCase();
 
   for (const word of norm.split(/[^a-z0-9\u4e00-\u9fff]+/)) {
     if (word.length >= 2 && !STOP.has(word)) tokens.add(word);
@@ -78,7 +77,19 @@ export function tokenizeForIndex(text: string, limit = 40): string[] {
     if (code.length >= 2 && !STOP.has(code)) tokens.add(code);
   }
 
-  return [...tokens].slice(0, limit);
+  return [...tokens];
+}
+
+export function tokenizeForIndex(text: string, limit = 80): string[] {
+  const norm = text.toLowerCase();
+  if (norm.length <= 480) return collectIndexTokens(norm).slice(0, limit);
+
+  const head = collectIndexTokens(norm.slice(0, 480));
+  const tail = collectIndexTokens(norm.slice(-480));
+  const merged = [...new Set([...head, ...tail])];
+  if (merged.length <= limit) return merged;
+  const headKeep = Math.ceil(limit * 0.6);
+  return [...new Set([...head.slice(0, headKeep), ...tail.slice(-(limit - headKeep))])].slice(0, limit);
 }
 
 export function isEvidenceQuery(query: string): boolean {

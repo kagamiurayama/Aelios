@@ -72,8 +72,19 @@ export async function recallPatch(
     )
     : [];
 
-  const quoteEntries = quotes.map((hit) => ({ kind: "quote", content: formatQuote(hit), id: hit.id }));
-  const regularHits = recall.hits.filter((hit) => !quotes.some((quote) => quoteOverlaps(hit.content, quote.content)));
+  const quoteEntries = quotes.map((hit) => ({
+    kind: "quote",
+    content: formatQuote(hit),
+    id: hit.id,
+    excerpt: hit.excerpt
+  }));
+  const droppedAsQuoteDup = recall.hits.filter((hit) =>
+    quotes.some((quote) => quoteOverlaps(hit.content, quote.excerpt || quote.content))
+  );
+  const regularHits = recall.hits.filter((hit) => !droppedAsQuoteDup.some((dup) => dup.id === hit.id));
+  const droppedPrecious = precious
+    .filter((row) => !relevantPrecious.some((kept) => kept.id === row.id))
+    .slice(0, 12);
   const assembled = assembleRecallSurface([
     ...(evidence ? quoteEntries : []),
     ...relevantPrecious.map(p => ({ kind: "precious", content: p.content, id: p.id })),
@@ -101,6 +112,7 @@ export async function recallPatch(
     recall_id: recallId,
     identity: identity.slug,
     query: query.slice(0, 80),
+    tokens: shaped.lexicalTokens.slice(0, 12),
     thin: shaped.thin,
     evidence,
     channels: {
@@ -108,8 +120,23 @@ export async function recallPatch(
       quotes: quotes.length,
       regular_hits: regularHits.length,
       week_blocks: weekBlocks.length,
-      dropped_as_quote_dup: recall.hits.length - regularHits.length
+      dropped_as_quote_dup: droppedAsQuoteDup.length
     },
+    items: assembled.entries.map((entry) => ({
+      id: entry.id ?? null,
+      kind: entry.kind,
+      reason: entry.kind === "quote"
+        ? "quote_excerpt"
+        : entry.kind === "precious"
+          ? "precious_lexical"
+          : entry.kind === "authored"
+            ? "authored_verbatim"
+            : "recall_hit"
+    })),
+    excluded: [
+      ...droppedAsQuoteDup.map((hit) => ({ id: hit.id, reason: "quote_dup_on_excerpt" })),
+      ...droppedPrecious.map((row) => ({ id: row.id, reason: "precious_not_relevant" }))
+    ].slice(0, 24),
     injected: assembled.entries.length,
     kinds: assembled.entries.map((entry) => entry.kind),
     budget: { maxItems: budget.maxItems, maxChars: budget.maxChars }
