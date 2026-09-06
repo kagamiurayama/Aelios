@@ -46,8 +46,7 @@ export const SECRET_SPECS: { name: string; label: string }[] = [
   { name: "DEBUG_API_KEY", label: "维护密钥（跨记忆空间操作）" },
   { name: "MEMORY_MCP_API_KEY", label: "MCP 密钥" },
   { name: "GUIDE_DOG_API_KEY", label: "导盲犬密钥" },
-  { name: "GATEWAY_SECRETS", label: "自定义 HTTP 上游的密钥表（JSON）" },
-  { name: "CLOUDFLARE_API_TOKEN", label: "CF REST 线路 / 维护工具用" },
+  { name: "CLOUDFLARE_API_TOKEN", label: "CF 令牌（网关上游就靠它，一把管所有）" },
   { name: "GITHUB_DAILY_TOKEN", label: "GitHub 日档只读 PAT" }
 ];
 

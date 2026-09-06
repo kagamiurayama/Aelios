@@ -12,7 +12,7 @@ import { handleVectorDoctor, handleVectorHealth, handleVectorReindex } from "./a
 import { handleDreamHarvest, handleDreamRun, handleDreamStatus } from "./api/dream";
 import { handleGateway } from "./gateway/handler";
 import { handleGatewayAdmin, handleGatewayEnv, gatewayAdminPage } from "./gateway/admin";
-import { loadConfig, loadSettings, type Protocol } from "./gateway/config";
+import { identityNamespace, loadConfig, loadSettings, type Protocol } from "./gateway/config";
 import { applySettings } from "./gateway/settings";
 import { handleGuideDogChatCompletions } from "./api/guideDog";
 import {
@@ -251,7 +251,7 @@ export default {
       (async () => {
         const config = await loadConfig(env);
         const namespaces = [...new Set([getDailyDigestNamespace(env),
-          ...config.identities.filter(i => i.record || (i.models || []).some(r => r.record)).map(i => i.namespace)])];
+          ...config.identities.filter(i => i.models.length).map(i => identityNamespace(i))])];
         for (const namespace of namespaces) {
           try {
             const results: unknown[] = [];

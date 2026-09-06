@@ -8,16 +8,15 @@ import { invalidateSettingsCache, validateConfig } from "../src/gateway/config";
 import { appendMemory, classifyTurn, canonical } from "../src/gateway/protocol";
 import { OutputCollector, observeResponse, persistExchange, prepareExchange, dispatchExchange } from "../src/gateway/record";
 
-// Test actual production modules and SQL, replacing only external bindings.
+// Test actual production modules and SQL, replacing only the external HTTP call.
 (crypto.subtle as any).timingSafeEqual = (a: Uint8Array, b: Uint8Array) => timingSafeEqual(a, b);
 let sqlite: DatabaseSync;
 let db: any, env: any, ctx: any;
 let pending: Promise<unknown>[], calls: any[], queue: any[];
 const identity = () => ({ slug: "partner", namespace: "partner-a", keys: ["CHATBOX_API_KEY"],
-  provider: "primary", memory: "request", record: true, anthropicThinking: "drop_block",
-  models: [{ match: "*haiku*", memory: "off", record: false }, { match: "listed-model" }] });
+  anthropicThinking: "drop_block", models: ["partner", "listed-model", "*opus*"] });
 function config(identities = [identity()]) {
-  return { version: 2, providers: { primary: { gateway: "default", provider: "compat" }, backup: { gateway: "backup", provider: "compat" } }, identities };
+  return { version: 3, upstream: { address: "https://upstream.test/ai/v1" }, identities };
 }
 function setConfig(c: any) { env.GATEWAY_CONFIG = JSON.stringify(c); }
 beforeEach(() => {
@@ -39,13 +38,14 @@ beforeEach(() => {
   calls = []; queue = []; pending = [];
   ctx = { waitUntil(p: Promise<unknown>) { pending.push(p); } };
   env = { DB: db, CHATBOX_API_KEY: "owner-key", IM_API_KEY: "im-key", MEMORY_MCP_API_KEY: "mcp-key",
-    MEMORY_QUEUE: { async send(e: any) { queue.push(e); } },
-    AI: { gateway(id: string) { return { async run(input: any) {
-      calls.push({ id, ...input });
-      if (input.endpoint === "responses") return Response.json({ model: "gpt-test", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Response reply" }] }] });
-      if (input.endpoint.endsWith("messages")) return Response.json({ model: "claude-test", content: [{ type: "thinking", thinking: "do not record" }, { type: "text", text: "Claude reply" }], stop_reason: "end_turn" });
-      return Response.json({ model: "actual", choices: [{ index: 0, message: { content: "你好，记住了。" }, finish_reason: "stop" }] });
-    } }; } } };
+    CLOUDFLARE_API_TOKEN: "cf-token",
+    MEMORY_QUEUE: { async send(e: any) { queue.push(e); } } };
+  globalThis.fetch = async (url: any, init: any) => {
+    calls.push({ url: String(url), headers: Object.fromEntries(new Headers(init?.headers)), query: JSON.parse(init?.body as string) });
+    if (String(url).endsWith("/responses")) return Response.json({ model: "gpt-test", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Response reply" }] }] });
+    if (String(url).endsWith("/messages")) return Response.json({ model: "claude-test", content: [{ type: "thinking", thinking: "do not record" }, { type: "text", text: "Claude reply" }], stop_reason: "end_turn" });
+    return Response.json({ model: "actual", choices: [{ index: 0, message: { content: "你好，记住了。" }, finish_reason: "stop" }] });
+  };
   setConfig(config());
 });
 function request(path: string, body?: any, headers: any = {}, method = body ? "POST" : "GET") {
@@ -68,6 +68,8 @@ test("migrations, native chat recall, namespace isolation, original text and Que
   const body = { model: "partner", messages: [{ role: "user", content: "我们喜欢什么？" }], extra_future_field: { opaque: true } };
   const { response } = await run("/v1/chat/completions", body);
   assert.equal(response.status, 200); assert.equal(response.headers.get("x-aelios-memory"), "injected");
+  assert.equal(calls[0].url, "https://upstream.test/ai/v1/chat/completions");
+  assert.equal(calls[0].headers.authorization, "Bearer cf-token");
   assert.match(calls[0].query.messages[0].content, /喜欢 Cloudflare/);
   assert.doesNotMatch(calls[0].query.messages[0].content, /other identity/);
   assert.deepEqual(calls[0].query.extra_future_field, body.extra_future_field);
@@ -91,10 +93,11 @@ test("Anthropic tool_result is not human; client beta, signatures, tools and cac
   assert.equal(calls[0].query.thinking.block_binding.prefix_mismatch_behavior, "drop_block");
   assert.match(calls[0].headers["anthropic-beta"], /client-beta/);
   assert.match(calls[0].headers["anthropic-beta"], /thinking-binding-controls/);
-  assert.equal(calls[0].headers.authorization, undefined); assert.equal(calls[0].headers["x-api-key"], undefined);
+  assert.equal(calls[0].headers.authorization, "Bearer cf-token");
+  assert.equal(calls[0].headers["x-api-key"], undefined);
   assert.equal(queue[0].kind, "tool"); assert.equal(queue[0].assistantText, "Claude reply");
 });
-test("Responses string input, tool outputs and encrypted reasoning; reject hidden server history", async () => {
+test("Responses string input, tool outputs and encrypted reasoning; hidden server history only rejected for main models", async () => {
   await run("/v1/responses", { model: "partner", input: "你好", store: true });
   assert.equal(calls[0].query.store, false); assert.equal(queue[0].userText, "你好");
   const input = [{ type: "reasoning", encrypted_content: "opaque" }, { type: "function_call_output", call_id: "t", output: "done" }];
@@ -102,6 +105,11 @@ test("Responses string input, tool outputs and encrypted reasoning; reject hidde
   assert.deepEqual(calls[1].query.input, input); assert.equal(queue[1].kind, "tool");
   const { response } = await run("/v1/responses", { model: "partner", input: "next", previous_response_id: "resp_previous" });
   assert.equal(response.status, 400); assert.equal(calls.length, 2);
+  // Outside the main list the gateway is a pure pipe: server state passes through, nothing recalled or recorded.
+  const side = await run("/v1/responses", { model: "side-model", input: "next", previous_response_id: "resp_previous" });
+  assert.equal(side.response.status, 200); assert.equal(side.response.headers.get("x-aelios-memory"), "off");
+  assert.equal(calls[2].query.previous_response_id, "resp_previous");
+  assert.equal(queue.length, 2);
 });
 test("append after multimodal blocks without modifying cache markers or original request", () => {
   const body = { messages: [{ role: "user", content: [{ type: "image", source: { data: "opaque" } }, { type: "text", text: "看这个", cache_control: { type: "ephemeral" } }] }] };
@@ -114,18 +122,18 @@ test("path picks the identity; keys gate it and the bare path falls back to the 
   const other = { ...identity(), slug: "other", namespace: "partner-b", keys: ["IM_API_KEY"] };
   setConfig(config([identity(), other]));
   const models = await run("/v1/models");
-  assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["listed-model"]);
+  assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
   assert.match(models.response.headers.get("cache-control")!, /no-store/);
-  const scoped = await run("/partner/v1/chat/completions", { model: "any-model", messages: [{ role: "user", content: "Hi" }] });
+  const scoped = await run("/partner/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
   assert.equal(scoped.response.headers.get("x-aelios-identity"), "partner");
   assert.equal(queue[0].namespace, "partner-a");
   // Another key's identity stays unreachable, and a body namespace cannot override it.
-  assert.equal((await run("/other/v1/chat/completions", { model: "any-model", messages: [] })).response.status, 403);
-  await run("/v1/chat/completions", { model: "any-model", namespace: "partner-b", messages: [{ role: "user", content: "Hi again" }] });
+  assert.equal((await run("/other/v1/chat/completions", { model: "partner", messages: [] })).response.status, 403);
+  await run("/v1/chat/completions", { model: "partner", namespace: "partner-b", messages: [{ role: "user", content: "Hi again" }] });
   assert.equal(queue[1].namespace, "partner-a");
-  const im = await run("/other/v1/chat/completions", { model: "any-model", messages: [{ role: "user", content: "Hi" }] }, { authorization: "Bearer im-key" });
+  const im = await run("/other/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] }, { authorization: "Bearer im-key" });
   assert.equal(im.response.headers.get("x-aelios-identity"), "other");
-  assert.equal((await run("/v1/chat/completions", { model: "any-model", messages: [] }, { authorization: "Bearer mcp-key" })).response.status, 403);
+  assert.equal((await run("/v1/chat/completions", { model: "partner", messages: [] }, { authorization: "Bearer mcp-key" })).response.status, 403);
 });
 test("auxiliary and incomplete replies do not become Dream sources", async () => {
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Generate title" }] }, { "x-aelios-purpose": "auxiliary" });
@@ -142,29 +150,23 @@ test("retry hashes ignore key order but distinguish later repeated words and ses
   assert.notEqual((await make(a)).userId, (await make({ ...a, messages: [...a.messages, { role: "assistant", content: "Hello" }, ...a.messages] })).userId);
   assert.equal(canonical({ b: 1, a: 2 }), canonical({ a: 2, b: 1 }));
 });
-test("model passthrough: first segment routes, rules rewrite, mute recall and recording", async () => {
+test("main-model whitelist gates recall and recording; other models pass through untouched", async () => {
   precious("partner-a", "喜欢 Cloudflare");
-  setConfig(config([{ ...identity(), models: [
-    { match: "*haiku*", memory: "off", record: false },
-    { match: "cheap", model: "backup/moonshot/kimi-k2" }
-  ] }]));
   const ask = (model: string) => run("/v1/chat/completions", { model, messages: [{ role: "user", content: "Hi " + model }] });
-  await ask("primary/gpt-9");
-  assert.deepEqual([calls[0].id, calls[0].query.model], ["default", "gpt-9"]);
-  // A configured provider name only ever eats one segment; the rest is the upstream's own naming.
-  await ask("backup/openai/gpt-9");
-  assert.deepEqual([calls[1].id, calls[1].query.model], ["backup", "openai/gpt-9"]);
-  // An unknown prefix is part of the model name, not a route.
-  await ask("openai/gpt-9");
-  assert.deepEqual([calls[2].id, calls[2].query.model], ["default", "openai/gpt-9"]);
-  await ask("cheap");
-  assert.deepEqual([calls[3].id, calls[3].query.model], ["backup", "moonshot/kimi-k2"]);
-  assert.equal(queue.length, 4);
-  const small = await ask("claude-3-5-haiku-20241022");
+  await ask("partner");
+  assert.equal(calls[0].query.model, "partner");
+  assert.match(JSON.stringify(calls[0].query.messages), /Cloudflare/);
+  // Basename match: a glob pattern sees the model name with or without its author prefix.
+  const opus = await ask("anthropic/claude-opus-4-6");
+  assert.equal(opus.response.headers.get("x-aelios-memory"), "injected");
+  assert.equal(calls[1].query.model, "anthropic/claude-opus-4-6");
+  assert.equal(queue.length, 2);
+  // Off the list: no recall, no record, model name delivered byte-identical.
+  const small = await ask("claude-haiku-4-5");
   assert.equal(small.response.headers.get("x-aelios-memory"), "off");
-  assert.equal(calls[4].query.model, "claude-3-5-haiku-20241022");
-  assert.doesNotMatch(JSON.stringify(calls[4].query.messages), /Cloudflare/);
-  assert.equal(queue.length, 4);
+  assert.equal(calls[2].query.model, "claude-haiku-4-5");
+  assert.doesNotMatch(JSON.stringify(calls[2].query.messages), /Cloudflare/);
+  assert.equal(queue.length, 2);
 });
 test("SSE byte-exact Unicode and CRLF boundaries; no thinking in observed text", async () => {
   const raw = 'event: content_block_delta\r\ndata: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"secret"}}\r\n\r\n' +
@@ -198,21 +200,27 @@ test("admin configuration validation, D1 precedence and owner-only writes", asyn
   env.GATEWAY_CONFIG = "invalid env overridden by D1";
   assert.equal(JSON.parse((await run("/api/gateway/config")).text).identities[0].slug, "partner");
   assert.equal((await worker.fetch(request("/api/gateway/config", config(), { authorization: "Bearer im-key" }, "PUT"), env, ctx)).status, 401);
-  const bad = config(); (bad.providers.primary as any).headers = { authorization: "inline-secret" };
-  assert.throws(() => validateConfig(bad), /secretHeaders/);
+  assert.throws(() => validateConfig({ version: 2, identities: [] }), /version: 3/);
+  assert.throws(() => validateConfig({ version: 3, upstream: { address: "http://insecure.test" }, identities: [] }), /HTTPS/);
 });
-test("HTTP upstream receives configured secret only, preserving unknown fields and response bytes", async () => {
-  const c: any = config(); c.providers.primary = { baseUrl: "https://upstream.test/v1", secretHeaders: { authorization: { secret: "UPSTREAM", prefix: "Bearer " } } };
-  setConfig(c); env.GATEWAY_SECRETS = JSON.stringify({ UPSTREAM: "provider-key" });
-  const previous = globalThis.fetch;
+test("upstream receives the CF token only, preserving unknown fields and response bytes", async () => {
+  const mock = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
-    assert.equal(url, "https://upstream.test/v1/chat/completions");
-    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer provider-key");
+    assert.equal(String(url), "https://upstream.test/ai/v1/chat/completions");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("authorization"), "Bearer cf-token");
+    assert.equal(headers.get("x-api-key"), null);
     assert.deepEqual(JSON.parse(init?.body as string).future, { keep: true });
     return new Response(' {"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]} ', { headers: { "content-type": "application/json" } });
   };
   try { const result = await run("/v1/chat/completions", { model: "partner", messages: [], future: { keep: true } }); assert.match(result.text, /^ /); }
-  finally { globalThis.fetch = previous; }
+  finally { globalThis.fetch = mock; }
+});
+test("missing CF token fails loudly instead of leaking another credential", async () => {
+  delete env.CLOUDFLARE_API_TOKEN;
+  const { response } = await run("/v1/chat/completions", { model: "partner", messages: [] });
+  assert.equal(response.status, 502);
+  assert.equal(queue[0].completion, "failed");
 });
 test("thinking passthrough skips memory; explicit disabled thinking allows injection", async () => {
   precious("partner-a", "Cloudflare fan");

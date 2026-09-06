@@ -1,6 +1,5 @@
 export interface Env {
   GATEWAY_CONFIG?: string;
-  GATEWAY_SECRETS?: string;
   AI_GATEWAY_ID?: string;
   DB: D1Database;
   AI?: Ai;

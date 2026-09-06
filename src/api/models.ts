@@ -3,7 +3,7 @@ import type { Env } from "../types";
 import { json, openAiError } from "../utils/json";
 import { findIdentity, loadConfig } from "../gateway/config";
 
-/** Models are passthrough, so the list only advertises the wildcard-free rules as client hints. */
+/** Models are passthrough; the list advertises the identity's main models as client hints. */
 export async function handleModels(request: Request, env: Env, slug: string | null = null): Promise<Response> {
   const auth = await authenticate(request, env);
   if (!auth.ok) return openAiError("Unauthorized", 401, "authentication_error");
@@ -18,16 +18,9 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
   return json(
     {
       object: "list",
-      data: (identity.models || [])
-        .filter(rule => !rule.match.includes("*"))
-        .map(rule => (
-          {
-            id: rule.match,
-            object: "model",
-            created: 0,
-            owned_by: identity.slug
-          }
-        ))
+      data: identity.models
+        .filter(model => !model.includes("*"))
+        .map(model => ({ id: model, object: "model", created: 0, owned_by: identity.slug }))
     },
     { headers: { "Cache-Control": "private, no-store" } }
   );

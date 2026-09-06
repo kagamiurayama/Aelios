@@ -2,7 +2,7 @@ import { authenticate } from "../auth/apiKey";
 import { runRecall, buildCoreFingerprint } from "../memory/v2/recall";
 import { listPrecious } from "../db/v2";
 import type { Env } from "../types";
-import { findIdentity, loadConfig, resolveModel, type Identity, type Protocol } from "./config";
+import { findIdentity, identityNamespace, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
 import { appendMemory, classifyTurn, hasServerState, validateBody, type Body } from "./protocol";
 import { dispatchExchange, observeResponse, prepareExchange } from "./record";
 import { callGatewayUpstream } from "./upstream";
@@ -12,8 +12,9 @@ export function gatewayError(protocol: Protocol, message: string, status: number
   return Response.json(protocol === "messages" ? { type: "error", error: { type, message } } : { error: { type, message } }, { status });
 }
 export async function recallPatch(env: Env, identity: Identity, query: string, ctx: ExecutionContext): Promise<string> {
-  const precious = await listPrecious(env.DB, { namespace: identity.namespace, limit: 20 });
-  const recall = await runRecall(env, { namespace: identity.namespace, query,
+  const namespace = identityNamespace(identity);
+  const precious = await listPrecious(env.DB, { namespace, limit: 20 });
+  const recall = await runRecall(env, { namespace, query,
     core_fingerprint: buildCoreFingerprint(precious.map(p => p.content)),
     waitUntil: promise => ctx.waitUntil(promise.catch(() => console.error("gateway recall accounting failed"))) });
   const entries = [
@@ -52,32 +53,29 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       ? `No identity "${slug}" available for this key. Configure /admin/gateway, then use https://<host>/<identity>/v1.`
       : "This key has no identity. Configure one at /admin/gateway.", 403);
   }
-  // The model reaches the upstream as written; only its first segment may pick a provider.
-  const target = resolveModel(config, identity, body.model);
-  if (!Object.hasOwn(config.providers, target.provider)) {
-    return gatewayError(protocol, `Identity "${identity.slug}" has no provider "${target.provider}"`, 400);
-  }
-  if (protocol === "responses" && target.memory === "request" && hasServerState(body, protocol)) {
-    return gatewayError(protocol, "Request-only memory requires stateless Responses input: send full history without previous_response_id, conversation or item_reference; or use a memory-off model rule.", 400);
+  // Only main models carry memory and feed Dream; every other model passes through quietly.
+  const main = isMainModel(identity, body.model);
+  if (protocol === "responses" && main && hasServerState(body, protocol)) {
+    return gatewayError(protocol, "Request-only memory requires stateless Responses input: send full history without previous_response_id, conversation or item_reference; or use a model outside the main list.", 400);
   }
   const turn = classifyTurn(body, protocol, request.headers.get("x-aelios-purpose") === "auxiliary");
   let patch = "";
-  let memoryStatus = target.memory === "off" ? "off" : turn.kind !== "human" ? "skipped" : "empty";
+  let memoryStatus = !main ? "off" : turn.kind !== "human" ? "skipped" : "empty";
   const thinkingCompatible = protocol !== "messages" || identity.anthropicThinking === "drop_block" || body.thinking?.type === "disabled";
-  if (target.memory === "request" && turn.kind === "human" && turn.text && thinkingCompatible) {
+  if (main && turn.kind === "human" && turn.text && thinkingCompatible) {
     try { patch = await recallPatch(env, identity, turn.text, ctx); memoryStatus = patch ? "injected" : "empty"; }
     catch { memoryStatus = "unavailable"; console.error("gateway recall unavailable", { identity: identity.slug }); }
-  } else if (!thinkingCompatible && target.memory === "request") memoryStatus = "thinking-passthrough";
+  } else if (!thinkingCompatible && main) memoryStatus = "thinking-passthrough";
   const payload = appendMemory(body, protocol, patch);
-  if (protocol === "responses" && target.memory === "request") payload.store = false;
-  const exchange = target.record ? await prepareExchange(request, body, identity, protocol, turn, auth.profile.source) : null;
+  if (protocol === "responses" && main) payload.store = false;
+  const exchange = main ? await prepareExchange(request, body, identity, protocol, turn, auth.profile.source) : null;
   try {
-    const upstream = await callGatewayUpstream(env, config, identity, protocol, request, payload, target);
+    const upstream = await callGatewayUpstream(env, config, identity, protocol, request, payload);
     const headers = new Headers(upstream.headers);
     headers.set("x-aelios-identity", identity.slug);
     headers.set("x-aelios-memory", memoryStatus);
-    headers.set("x-aelios-provider", upstream.headers.get("cf-aig-provider") || target.provider);
-    headers.set("x-aelios-model", upstream.headers.get("cf-aig-model") || target.model);
+    headers.set("x-aelios-provider", upstream.headers.get("cf-aig-provider") || "");
+    headers.set("x-aelios-model", upstream.headers.get("cf-aig-model") || body.model);
     headers.set("cache-control", "no-store");
     const response = new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
     if (!exchange) return response;
@@ -97,7 +95,8 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
         interrupted || !out.complete ? "incomplete" : "complete";
       await dispatchExchange(env, exchange);
     });
-  } catch {
+  } catch (error) {
+    console.error("gateway upstream error", error);
     if (exchange) {
       exchange.completion = "failed";
       exchange.httpStatus = 502;
