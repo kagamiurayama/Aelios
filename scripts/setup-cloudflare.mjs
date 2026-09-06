@@ -4,20 +4,21 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const wranglerTomlPath = resolve(root, "wrangler.toml");
-const dbName = process.env.CMP_D1_NAME || "companion_memory_proxy";
-const dbBinding = process.env.CMP_D1_BINDING || "DB";
-const wranglerToml = readFileSync(wranglerTomlPath, "utf8");
-function readVectorizeValue(name) {
-  const match = wranglerToml.match(/\[\[vectorize\]\]([\s\S]*?)(?=\n\[|$)/);
-  return match?.[1]?.match(new RegExp(`${name}\\\\s*=\\\\s*"([^"]+)"`))?.[1];
+function readTomlBlock(block) {
+  const match = wranglerToml.match(new RegExp(`\\[\\[${block}\\]\\]([\\s\\S]*?)(?=\\n\\[|$)`));
+  return (name) => match?.[1]?.match(new RegExp(`${name}\\s*=\\s*"([^"]+)"`))?.[1];
 }
+const wranglerToml = readFileSync(wranglerTomlPath, "utf8");
+const dbName = process.env.CMP_D1_NAME || readTomlBlock("d1_databases")("database_name") || "companion_memory_proxy";
+const dbBinding = process.env.CMP_D1_BINDING || readTomlBlock("d1_databases")("binding") || "DB";
+const readVectorizeValue = readTomlBlock("vectorize");
 const vectorizeName =
   process.env.CMP_VECTORIZE_NAME || readVectorizeValue("index_name") || "memo-kb";
 const vectorizeBinding =
   process.env.CMP_VECTORIZE_BINDING || readVectorizeValue("binding") || "VECTORIZE";
 const vectorizeDimensions = process.env.CMP_VECTORIZE_DIMENSIONS || "1024";
 const vectorizeMetric = process.env.CMP_VECTORIZE_METRIC || "cosine";
-const queueName = process.env.CMP_QUEUE_NAME || "companion-memory";
+const queueName = process.env.CMP_QUEUE_NAME || readTomlBlock("queues.producers")("queue") || "companion-memory";
 // Variables that are safe to persist as visible Worker config in wrangler.toml
 // [vars]. Credentials are intentionally excluded — they must be provisioned
 // via `wrangler secret put <NAME>` (or the Cloudflare Dashboard) so plaintext
