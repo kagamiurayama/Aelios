@@ -102,6 +102,6 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       exchange.httpStatus = 502;
       ctx.waitUntil(dispatchExchange(env, exchange).catch(() => console.error("gateway exchange recording failed")));
     }
-    return gatewayError(protocol, "Upstream request failed", 502);
+    return gatewayError(protocol, `Upstream request failed: ${error instanceof Error ? error.message : String(error)}`, 502);
   }
 }

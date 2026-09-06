@@ -254,6 +254,7 @@ test("missing CF token fails loudly instead of leaking another credential", asyn
   delete env.CLOUDFLARE_API_TOKEN;
   const { response } = await run("/v1/chat/completions", { model: "partner", messages: [] });
   assert.equal(response.status, 502);
+  assert.match(JSON.parse(response.text).error.message, /CLOUDFLARE_API_TOKEN/);
   assert.equal(queue[0].completion, "failed");
 });
 test("thinking passthrough skips memory; explicit disabled thinking allows injection", async () => {
