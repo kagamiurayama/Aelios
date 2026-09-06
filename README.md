@@ -268,7 +268,7 @@ workers-ai/@cf/...         → env.AI.run（不走 AI Gateway）
 | POST | `/v1/debug/vector_reindex` | 向量重建 |
 | POST | `/admin/monthly-rollup` | 手触发月级 rollup（35 天前的 weekly_log → monthly_log） |
 
-所有非 `/health` `/admin` `/v1/models` 端点都要 `Authorization: Bearer <CHATBOX_API_KEY>`，按 scope（`memory:read` / `memory:write`）鉴权。
+所有非 `/health` `/admin` 端点都要 `Authorization: Bearer <key>`：`/v1/models` 与网关接口按白名单老公钥匙鉴权，记忆接口按 scope（`memory:read` / `memory:write`）鉴权。
 
 ### POST `/v1/memory/recall`
 

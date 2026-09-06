@@ -41,6 +41,10 @@ beforeEach(() => {
     CLOUDFLARE_API_TOKEN: "cf-token",
     MEMORY_QUEUE: { async send(e: any) { queue.push(e); } } };
   globalThis.fetch = async (url: any, init: any) => {
+    if (String(url).endsWith("/models")) {
+      calls.push({ url: String(url), headers: Object.fromEntries(new Headers(init?.headers)), query: null });
+      return Response.json({ object: "list", data: [{ id: "anthropic/claude-opus-4-5", object: "model" }] });
+    }
     calls.push({ url: String(url), headers: Object.fromEntries(new Headers(init?.headers)), query: JSON.parse(init?.body as string) });
     if (String(url).endsWith("/responses")) return Response.json({ model: "gpt-test", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Response reply" }] }] });
     if (String(url).endsWith("/messages")) return Response.json({ model: "claude-test", content: [{ type: "thinking", thinking: "do not record" }, { type: "text", text: "Claude reply" }], stop_reason: "end_turn" });
@@ -122,7 +126,10 @@ test("path picks the identity; keys gate it and the bare path falls back to the 
   const other = { ...identity(), slug: "other", namespace: "partner-b", keys: ["IM_API_KEY"] };
   setConfig(config([identity(), other]));
   const models = await run("/v1/models");
-  assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
+  // The upstream catalog passes through untouched, with the CF token on the wire.
+  assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["anthropic/claude-opus-4-5"]);
+  assert.equal(calls[0].url, "https://upstream.test/ai/v1/models");
+  assert.equal(calls[0].headers.authorization, "Bearer cf-token");
   assert.match(models.response.headers.get("cache-control")!, /no-store/);
   const scoped = await run("/partner/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
   assert.equal(scoped.response.headers.get("x-aelios-identity"), "partner");
@@ -135,6 +142,18 @@ test("path picks the identity; keys gate it and the bare path falls back to the 
   assert.equal(im.response.headers.get("x-aelios-identity"), "other");
   assert.equal((await run("/v1/chat/completions", { model: "partner", messages: [] }, { authorization: "Bearer mcp-key" })).response.status, 403);
 });
+test("model catalog falls back to main-model hints when the upstream cannot answer", async () => {
+  const mock = globalThis.fetch;
+  globalThis.fetch = async () => new Response("nope", { status: 404 });
+  try {
+    const models = await run("/v1/models");
+    assert.deepEqual(JSON.parse(models.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
+  } finally { globalThis.fetch = mock; }
+  delete env.CLOUDFLARE_API_TOKEN;
+  const offline = await run("/v1/models");
+  assert.deepEqual(JSON.parse(offline.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
+});
+
 test("auxiliary and incomplete replies do not become Dream sources", async () => {
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Generate title" }] }, { "x-aelios-purpose": "auxiliary" });
   await persistExchange(env, queue[0]); assert.equal(count("messages"), 0);
