@@ -34,6 +34,7 @@ import {
   upsertGlossary,
   upsertMemoryByFactKey
 } from "../db/v2";
+import { withImpressionDisclaimer } from "../memory/impression";
 import { isV2Enabled, runRecall } from "../memory/v2/recall";
 
 import type { Env, KeyProfile, MemoryApiRecord } from "../types";
@@ -498,7 +499,7 @@ export async function handleMemoryBoot(request: Request, env: Env): Promise<Resp
   return json({
     data: {
       namespace,
-      daily_log: dailyLog,
+      daily_log: dailyLog ? withImpressionDisclaimer({ ...dailyLog }) : dailyLog,
       precious,
       glossary,
       today_messages: todayMessages,
@@ -543,7 +544,9 @@ export async function handleDiaryApi(request: Request, env: Env): Promise<Respon
       getDailyLog(env.DB, { namespace, date: today }),
       getDailyLog(env.DB, { namespace, date: yesterday })
     ]);
-    const data = rows.filter((row): row is NonNullable<typeof row> => Boolean(row));
+    const data = rows
+      .filter((row): row is NonNullable<typeof row> => Boolean(row))
+      .map((row) => withImpressionDisclaimer({ ...row }));
     return json({ data });
   }
 
@@ -556,7 +559,7 @@ export async function handleDiaryApi(request: Request, env: Env): Promise<Respon
   if (!row) {
     return json({ data: null }, { status: 404 });
   }
-  return json({ data: row });
+  return json({ data: withImpressionDisclaimer({ ...row }) });
 }
 
 export async function handlePrecious(request: Request, env: Env): Promise<Response> {

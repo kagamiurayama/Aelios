@@ -2,6 +2,7 @@ import { authenticate } from "../auth/apiKey";
 import { runRecall, buildCoreFingerprint } from "../memory/v2/recall";
 import { listPrecious } from "../db/v2";
 import { selectRelevantPrecious, shapeRecallQuery } from "../memory/queryShape";
+import { IMPRESSION_DISCLAIMER } from "../memory/impression";
 import { formatRecallSurface } from "../memory/surface";
 import type { Env } from "../types";
 import { findIdentity, identityNamespace, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
@@ -36,7 +37,7 @@ export async function recallPatch(
     ...relevantPrecious.map(p => ({ kind: "precious", content: p.content })),
     ...recall.glossary_hits.map(p => ({ kind: "glossary", content: `${p.term}: ${p.definition}` })),
     ...recall.hits.map(p => ({ kind: p.type, content: p.content })),
-    ...recall.week_blocks.map(p => ({ kind: "week", content: `${p.week}: ${p.summary}` }))
+    ...recall.week_blocks.map(p => ({ kind: "week", content: `${IMPRESSION_DISCLAIMER} ${p.week}: ${p.summary}` }))
   ], identity.maxMemoryChars || 6000);
 }
 export async function handleGateway(request: Request, env: Env, ctx: ExecutionContext,
