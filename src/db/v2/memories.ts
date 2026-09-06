@@ -1,4 +1,5 @@
 import { upsertMemoryEmbedding } from "../../memory/embedding";
+import { upsertMemoryFts } from "../../memory/fts";
 import { clampMemoryType } from "../../memory/canonicalTypes";
 import type {
   Env,
@@ -97,7 +98,7 @@ export async function listActiveFactKeys(
 // 调用方 (dream/judge 每条独立 try/catch) 记失败跳过，亲笔原文保住。
 // =====================================================================
 
-const HAND_AUTHOR_SOURCES = new Set(["mcp", "manual", "api"]);
+const HAND_AUTHOR_SOURCES = new Set(["mcp", "manual", "api", "remember_now"]);
 
 export function isHandAuthorSource(source: string | null | undefined): boolean {
   return typeof source === "string" && HAND_AUTHOR_SOURCES.has(source);
@@ -238,6 +239,7 @@ export async function upsertMemoryByFactKey(
       .bind(input.factKey, input.validAsOf ?? null, now, existing.id)
       .run();
     await syncMemoryVector(env, { namespace: input.namespace, id: existing.id });
+    await upsertMemoryFts(env.DB, { namespace: input.namespace, memoryId: existing.id, content: input.content });
     return { id: existing.id, created: false };
   }
 
@@ -281,6 +283,7 @@ export async function upsertMemoryByFactKey(
     .run();
 
   await syncMemoryVector(env, { namespace: input.namespace, id });
+  await upsertMemoryFts(env.DB, { namespace: input.namespace, memoryId: id, content: input.content });
   return { id, created: true };
 }
 

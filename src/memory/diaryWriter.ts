@@ -101,7 +101,7 @@ async function listMessagesTailInRange(
          AND role IN ('user', 'assistant')
          AND created_at >= ?
          AND created_at < ?
-       ORDER BY created_at DESC
+       ORDER BY created_at DESC, id DESC
        LIMIT ?`
     )
     .bind(input.namespace, input.startCreatedAt, input.endCreatedAt, input.limit)
@@ -298,6 +298,19 @@ export async function runDiaryWriter(
     modelCall.result.source_message_ids,
     messages.map((message) => message.id)
   );
+
+  if (sourceMessageIds.length === 0) {
+    return {
+      enabled: true,
+      date: dateLabel,
+      ran: false,
+      reason: "ungrounded_sources",
+      title: modelCall.result.title,
+      summary_chars: modelCall.result.summary.length,
+      message_count: messages.length,
+      model: modelCall.model
+    };
+  }
 
   await upsertDailyLog(env.DB, {
     namespace,

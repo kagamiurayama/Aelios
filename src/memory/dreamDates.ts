@@ -99,10 +99,33 @@ export function getDateRangeForLabel(dateLabel: string, timeZone: string): { sta
   };
 }
 
-export function readDailyCursor(value: string | null, startIso: string, endIso: string): { done: boolean; after: string | null } {
-  if (!value) return { done: false, after: null };
-  if (value.startsWith("done:")) return { done: true, after: null };
-  if (value >= startIso && value < endIso) return { done: false, after: value };
-  return { done: false, after: null };
+export interface DreamCursorState {
+  done: boolean;
+  after: string | null;
+  afterId: string | null;
+}
+
+export function parseDreamCursor(value: string | null): { done: boolean; createdAt: string | null; id: string | null } {
+  if (!value) return { done: false, createdAt: null, id: null };
+  const done = value.startsWith("done:");
+  const raw = done ? value.slice("done:".length) : value;
+  const hash = raw.indexOf("#");
+  if (hash < 0) return { done, createdAt: raw || null, id: null };
+  return { done, createdAt: raw.slice(0, hash) || null, id: raw.slice(hash + 1) || null };
+}
+
+export function formatDreamCursor(input: { done: boolean; createdAt: string; id?: string | null }): string {
+  const body = input.id ? `${input.createdAt}#${input.id}` : input.createdAt;
+  return input.done ? `done:${body}` : body;
+}
+
+export function readDailyCursor(value: string | null, startIso: string, endIso: string): DreamCursorState {
+  if (!value) return { done: false, after: null, afterId: null };
+  const parsed = parseDreamCursor(value);
+  if (parsed.done) return { done: true, after: null, afterId: null };
+  if (parsed.createdAt && parsed.createdAt >= startIso && parsed.createdAt < endIso) {
+    return { done: false, after: parsed.createdAt, afterId: parsed.id };
+  }
+  return { done: false, after: null, afterId: null };
 }
 
