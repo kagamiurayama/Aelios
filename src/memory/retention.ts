@@ -81,6 +81,9 @@ export async function runMemoryRetention(
 
   // 1. Delete old messages
   stats.messages = await deleteOldMessages(env.DB, namespace, daysAgo(messagesRetentionDays(env)));
+  const exchanges = await env.DB.prepare("DELETE FROM gateway_exchanges WHERE namespace = ? AND created_at < ?")
+    .bind(namespace, daysAgo(messagesRetentionDays(env))).run();
+  stats.gatewayExchanges = exchanges.meta.changes ?? 0;
 
   // 2. Delete old usage_logs
   stats.usageLogs = await deleteOldUsageLogs(env.DB, namespace, daysAgo(USAGE_LOGS_RETENTION_DAYS));

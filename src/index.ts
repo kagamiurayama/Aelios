@@ -8,10 +8,11 @@ import {
   handleWeeklyApproveAdmin
 } from "./api/admin";
 import { handleHealth } from "./api/health";
-import { handleCache } from "./api/cache";
-import { handleCacheHealth, handleVectorDoctor, handleVectorHealth, handleVectorReindex } from "./api/debug";
+import { handleVectorDoctor, handleVectorHealth, handleVectorReindex } from "./api/debug";
 import { handleDreamHarvest, handleDreamRun, handleDreamStatus } from "./api/dream";
-import { handleChatCompletions } from "./api/chatCompletions";
+import { handleGateway } from "./gateway/handler";
+import { handleGatewayAdmin, gatewayAdminPage } from "./gateway/admin";
+import { loadConfig } from "./gateway/config";
 import { handleGuideDogChatCompletions } from "./api/guideDog";
 import {
   handleGlossaryApi,
@@ -73,6 +74,11 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    if (request.method === "GET" && url.pathname === "/admin/gateway") return gatewayAdminPage();
+    if (url.pathname === "/api/gateway/config") return handleGatewayAdmin(request, env);
+    if (request.method === "POST" && url.pathname === "/v1/messages") return handleGateway(request, env, ctx, "messages");
+    if (request.method === "POST" && url.pathname === "/v1/responses") return handleGateway(request, env, ctx, "responses");
+
     if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/memory-admin")) {
       return handleAdmin();
     }
@@ -110,7 +116,7 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
-      return handleChatCompletions(request, env, ctx);
+      return handleGateway(request, env, ctx, "chat");
     }
 
     if (
@@ -175,14 +181,6 @@ export default {
       return handleSearchMemoriesApi(request, env);
     }
 
-    if (url.pathname.startsWith("/v1/cache/")) {
-      return handleCache(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/v1/debug/cache_health") {
-      return handleCacheHealth(request, env);
-    }
-
     if (request.method === "GET" && url.pathname === "/v1/debug/vector_health") {
       return handleVectorHealth(request, env);
     }
@@ -223,80 +221,88 @@ export default {
   },
 
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    const namespace = getDailyDigestNamespace(env);
     const cron = controller.cron;
     const shouldRunDailyMaintenance = !cron || cron === DAILY_MAINTENANCE_CRON;
 
     if (!shouldRunDailyMaintenance) {
-      console.log("scheduled memory maintenance skipped unknown cron", { namespace, cron });
+      console.log("scheduled memory maintenance skipped unknown cron", { cron });
       return;
     }
 
     ctx.waitUntil(
       (async () => {
-        const results: unknown[] = [];
+        const config = await loadConfig(env);
+        const namespaces = [...new Set([getDailyDigestNamespace(env),
+          ...config.profiles.filter(p => p.record).map(p => p.namespace)])];
+        for (const namespace of namespaces) {
+          try {
+            const results: unknown[] = [];
 
-        const dreamResults = await runDailyMemoryDigestBatches(env, namespace);
-        results.push({ type: "dream_batches", results: dreamResults });
+            const dreamResults = await runDailyMemoryDigestBatches(env, namespace);
+            results.push({ type: "dream_batches", results: dreamResults });
 
-        // Rollup phase triggers (diary → github∥retention → weekly → monthly). Order preserved.
-        let diaryWriter: Awaited<ReturnType<typeof runDiaryTrigger>> | undefined;
-        try {
-          diaryWriter = await runDiaryTrigger(env, namespace);
-        } catch (error) {
-          console.error("scheduled diary writer failed", {
-            namespace,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-        results.push({ type: "diary_writer", result: diaryWriter ?? { ok: false } });
-
-        const [retentionResult, githubResult] = await Promise.all([
-          runMemoryRetention(env, namespace).then(
-            (retention) => ({ ok: true as const, retention }),
-            (error) => {
-              console.error("scheduled memory retention failed", { namespace, error: String(error) });
-              return { ok: false as const, error: String(error) };
+            // Rollup phase triggers (diary → github∥retention → weekly → monthly). Order preserved.
+            let diaryWriter: Awaited<ReturnType<typeof runDiaryTrigger>> | undefined;
+            try {
+              diaryWriter = await runDiaryTrigger(env, namespace);
+            } catch (error) {
+              console.error("scheduled diary writer failed", {
+                namespace,
+                error: error instanceof Error ? error.message : String(error)
+              });
             }
-          ),
-          // 04:10 SGT cron (20:10 UTC) runs ~4h after cmh-lite's 23:50 local push — safe to pull yesterday's daily.
-          runGithubDailyTrigger(env).then(
-            (r) => {
-              console.log("github daily pull", r);
-              return r;
-            },
-            (e) => {
-              console.error("github daily pull failed", String(e));
-              return { ok: false };
+            results.push({ type: "diary_writer", result: diaryWriter ?? { ok: false } });
+
+            const [retentionResult, githubResult] = await Promise.all([
+              runMemoryRetention(env, namespace).then(
+                (retention) => ({ ok: true as const, retention }),
+                (error) => {
+                  console.error("scheduled memory retention failed", { namespace, error: String(error) });
+                  return { ok: false as const, error: String(error) };
+                }
+              ),
+              // 04:10 SGT cron (20:10 UTC) runs ~4h after cmh-lite's 23:50 local push — safe to pull yesterday's daily.
+              (namespace === namespaces[0] ? runGithubDailyTrigger(env) : Promise.resolve({ skipped: true })).then(
+                (r) => {
+                  console.log("github daily pull", r);
+                  return r;
+                },
+                (e) => {
+                  console.error("github daily pull failed", String(e));
+                  return { ok: false };
+                }
+              )
+            ]);
+            results.push({ type: "retention", result: retentionResult });
+            results.push({ type: "github_daily", result: githubResult });
+
+            let weeklyRollup: Awaited<ReturnType<typeof runWeeklyRollupTrigger>> | undefined;
+            try {
+              weeklyRollup = await runWeeklyRollupTrigger(env, namespace);
+            } catch (error) {
+              console.error("scheduled weekly rollup failed", {
+                namespace,
+                error: error instanceof Error ? error.message : String(error)
+              });
             }
-          )
-        ]);
-        results.push({ type: "retention", result: retentionResult });
-        results.push({ type: "github_daily", result: githubResult });
+            results.push({ type: "weekly_rollup", result: weeklyRollup ?? { ok: false } });
 
-        let weeklyRollup: Awaited<ReturnType<typeof runWeeklyRollupTrigger>> | undefined;
-        try {
-          weeklyRollup = await runWeeklyRollupTrigger(env, namespace);
-        } catch (error) {
-          console.error("scheduled weekly rollup failed", {
-            namespace,
-            error: error instanceof Error ? error.message : String(error)
-          });
+            let monthlyRollup: Awaited<ReturnType<typeof runMonthlyRollupTrigger>> | undefined;
+            try {
+              monthlyRollup = await runMonthlyRollupTrigger(env, namespace);
+            } catch (error) {
+              console.error("scheduled monthly rollup failed", {
+                namespace,
+                error: error instanceof Error ? error.message : String(error)
+              });
+            }
+            results.push({ type: "monthly_rollup", result: monthlyRollup ?? { ok: false } });
+
+            console.log("scheduled memory maintenance", { namespace, cron, results });
+          } catch (error) {
+            console.error("scheduled namespace maintenance failed", { namespace, error: String(error) });
+          }
         }
-        results.push({ type: "weekly_rollup", result: weeklyRollup ?? { ok: false } });
-
-        let monthlyRollup: Awaited<ReturnType<typeof runMonthlyRollupTrigger>> | undefined;
-        try {
-          monthlyRollup = await runMonthlyRollupTrigger(env, namespace);
-        } catch (error) {
-          console.error("scheduled monthly rollup failed", {
-            namespace,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-        results.push({ type: "monthly_rollup", result: monthlyRollup ?? { ok: false } });
-
-        console.log("scheduled memory maintenance", { namespace, cron, results });
       })()
     );
   }

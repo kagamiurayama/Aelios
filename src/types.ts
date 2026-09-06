@@ -135,7 +135,7 @@ export interface RetentionQueueMessage {
   namespace: string;
 }
 
-export type QueueMessage = RetentionQueueMessage;
+export type QueueMessage = RetentionQueueMessage | import("./gateway/record").GatewayExchange;
 
 export type Scope =
   | "chat:proxy"

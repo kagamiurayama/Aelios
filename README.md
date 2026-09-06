@@ -1,5 +1,10 @@
 # Aelios
 
+> **`feat/memory-gateway` 开发分支**：主入口改为 Cloudflare 原生三协议记忆网关。
+> 请先看 [网关配置与接入](docs/memory-gateway.md)，从 `/admin/gateway` 配置身份和线路。
+> `/v1/chat/completions` 不再使用旧 assembler / 缓存编排，新增 `/v1/messages` 和 `/v1/responses`。
+> 下文旧聊天接入说明仅供历史参考，本分支以新文档为准；旧记忆管理与 MCP 仍保留。
+
 > 给 AI 装一颗跨窗口的长期记忆大脑。换窗口、换客户端、换模型，记忆跟着你走。
 
 这份 README 分两段。**上半段给人看**：草履虫也能懂，照着做就能用。**下半段给 AI 看**：端点、MCP、管线细节，给 Codex / Claude Code / Cursor 维护调试用。
