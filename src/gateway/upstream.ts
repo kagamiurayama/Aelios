@@ -13,7 +13,7 @@ const REST_HOST_RE =
 export interface ResolvedUpstream {
   accountId: string | null;
   gatewayId: string;
-  /** Always `.../{gateway}/compat` for CF. Custom OpenAI bases stay as typed. */
+  /** CF: the REST base (`.../ai/v1`). The compat base is derived only for the models catalog. */
   base: string;
 }
 
@@ -24,6 +24,12 @@ function configuredAddress(env: Env, config: GatewayConfig): string {
 /** The only CF catalog that actually lists models. Do not change this shape. */
 export function compatBase(accountId: string, gatewayId: string): string {
   return `https://gateway.ai.cloudflare.com/v1/${accountId.toLowerCase()}/${gatewayId}/compat`;
+}
+
+/** Chat, messages and responses live on CF REST; the compat surface only serves
+ *  chat/completions plus the models catalog, so it must never carry chat traffic. */
+export function restBase(accountId: string): string {
+  return `https://api.cloudflare.com/client/v4/accounts/${accountId.toLowerCase()}/ai/v1`;
 }
 
 export function resolveGatewayId(env: Env, address = ""): string {
@@ -48,23 +54,23 @@ export function resolveUpstream(env: Env, config: GatewayConfig): ResolvedUpstre
   const gatewayId = resolveGatewayId(env, trimmed);
 
   if (ACCOUNT_RE.test(trimmed)) {
-    return { accountId: trimmed.toLowerCase(), gatewayId, base: compatBase(trimmed, gatewayId) };
+    return { accountId: trimmed.toLowerCase(), gatewayId, base: restBase(trimmed) };
   }
 
   const rest = trimmed.match(REST_HOST_RE);
   if (rest) {
-    return { accountId: rest[1].toLowerCase(), gatewayId, base: compatBase(rest[1], gatewayId) };
+    return { accountId: rest[1].toLowerCase(), gatewayId, base: restBase(rest[1]) };
   }
 
   const gw = parseGatewayHost(trimmed);
   if (gw) {
-    return { accountId: gw.accountId.toLowerCase(), gatewayId, base: compatBase(gw.accountId, gatewayId) };
+    return { accountId: gw.accountId.toLowerCase(), gatewayId, base: restBase(gw.accountId) };
   }
 
   return { accountId: null, gatewayId, base: trimmed };
 }
 
-/** Same base the model list uses. Chat / messages / responses only append their path. */
+/** Chat traffic base: CF REST for CF addresses, custom bases untouched. */
 export function upstreamBaseUrl(env: Env, config: GatewayConfig, _protocol?: Protocol): string {
   return resolveUpstream(env, config).base;
 }
@@ -91,7 +97,7 @@ export async function callGatewayUpstream(env: Env, config: GatewayConfig, ident
     if (value) headers.set(name, value);
   }
   if (protocol === "messages" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
-  if (resolved.gatewayId) headers.set("cf-aig-gateway-id", resolved.gatewayId);
+  if (resolved.accountId && resolved.gatewayId) headers.set("cf-aig-gateway-id", resolved.gatewayId);
   applyThinkingPolicy(body, identity, protocol, headers);
   return fetch(`${resolved.base}/${PATHS[protocol]}`, {
     method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"

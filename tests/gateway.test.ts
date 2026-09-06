@@ -342,16 +342,22 @@ test("please-remember writes the original words into long-term memory", async ()
   assert.match(JSON.stringify(calls[1].query.messages), /\[quote\].*芝麻开门|\[authored\].*芝麻开门/);
 });
 
-test("upstream forwards the panel Gateway ID", async () => {
+test("upstream forwards the Gateway ID header to CF, never to custom upstreams", async () => {
   env.AI_GATEWAY_ID = "panel-gateway";
+  setConfig({ ...config(), upstream: { address: "a".repeat(32) } });
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
   assert.equal(calls[0].headers["cf-aig-gateway-id"], "panel-gateway");
+  calls = [];
+  setConfig(config());
+  await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(calls[0].headers["cf-aig-gateway-id"], undefined);
 });
 
-test("every CF paste form assembles chat/messages/responses from the same compat base", () => {
+test("every CF paste form sends chat traffic to REST and only the catalog to compat", () => {
   const acct = "d121aa7cd60ccebd6213c931efce41da";
   const envLike = {} as any;
   const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`;
+  const rest = `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`;
   const forms = [
     acct,
     acct.toUpperCase(),
@@ -369,20 +375,21 @@ test("every CF paste form assembles chat/messages/responses from the same compat
   for (const address of forms) {
     const cfg = { version: 3 as const, upstream: { address }, identities: [] };
     assert.equal(catalogUrl(envLike, cfg), `${compat}/models`, address);
-    assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), compat, address);
-    assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), compat, address);
-    assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), compat, address);
+    assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), rest, address);
+    assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), rest, address);
+    assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), rest, address);
   }
 });
 
-test("CF account ID puts the Gateway ID into the Unified compat URL for chat", () => {
+test("the Gateway ID names the catalog; chat traffic rides REST with the header", () => {
   const acct = "b".repeat(32);
   const envLike = { AI_GATEWAY_ID: "my-gw" } as any;
   const cfg = { version: 3 as const, upstream: { address: acct }, identities: [] };
   const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat`;
-  assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), compat);
-  assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), compat);
-  assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), compat);
+  const rest = `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`;
+  assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), rest);
+  assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), rest);
+  assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), rest);
   assert.equal(catalogUrl(envLike, cfg), `${compat}/models`);
   assert.equal(
     catalogUrl(envLike, { ...cfg, upstream: { address: `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat/` } }),
@@ -390,29 +397,30 @@ test("CF account ID puts the Gateway ID into the Unified compat URL for chat", (
   );
 });
 
-test("chat to a CF account uses the compat host, not the REST default gateway", async () => {
+test("chat to a CF account uses REST plus the Gateway ID header", async () => {
   const acct = "c".repeat(32);
   env.AI_GATEWAY_ID = "custom-gw";
   setConfig({ ...config(), upstream: { address: acct } });
   await run("/v1/chat/completions", { model: "custom-foo/bar", messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${acct}/custom-gw/compat/chat/completions`);
+  assert.equal(calls[0].url, `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1/chat/completions`);
   assert.equal(calls[0].headers["cf-aig-gateway-id"], "custom-gw");
 });
 
-test("the working compat URL keeps catalog on /models and shares that base for every protocol", async () => {
+test("a pasted compat URL keeps the catalog on compat while chat protocols ride REST", async () => {
   const acct = "d121aa7cd60ccebd6213c931efce41da";
   const pasted = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/`;
   const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`;
+  const rest = `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`;
   setConfig({ ...config(), upstream: { address: pasted } });
   const models = await run("/v1/models");
   assert.equal(models.response.headers.get("x-aelios-models"), "upstream");
   assert.equal(calls[0].url, `${compat}/models`);
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[1].url, `${compat}/chat/completions`);
+  assert.equal(calls[1].url, `${rest}/chat/completions`);
   await run("/v1/messages", { model: "partner", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[2].url, `${compat}/messages`);
+  assert.equal(calls[2].url, `${rest}/messages`);
   await run("/v1/responses", { model: "partner", input: "Hi" });
-  assert.equal(calls[3].url, `${compat}/responses`);
+  assert.equal(calls[3].url, `${rest}/responses`);
 });
 
 test("settings edited in the admin page override deployment vars everywhere", async () => {
