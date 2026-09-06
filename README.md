@@ -3,6 +3,7 @@
 > **`feat/memory-gateway` 开发分支**：主入口改为 Cloudflare 原生三协议记忆网关。
 > 请先看 [网关配置与接入](docs/memory-gateway.md)，从 `/admin/gateway` 配置身份和线路。
 > 每个身份一个地址 `https://<host>/<身份>/v1`，模型名原样透传给上游，fallback 交给 CF Dynamic Routes。
+> Worker Settings 只需要填 `CHATBOX_API_KEY` 一个密钥，其余参数在 `/admin/gateway` 的「环境设置」里填，下文的变量表仅供查阅。
 > `/v1/chat/completions` 不再使用旧 assembler / 缓存编排，新增 `/v1/messages` 和 `/v1/responses`。
 > 下文旧聊天接入说明仅供历史参考，本分支以新文档为准；旧记忆管理与 MCP 仍保留。
 
@@ -417,6 +418,10 @@ hard delete: deleted/superseded/expired 超 30 天 → 先删 Vectorize 再删 D
 | `GITHUB_DAILY_TOKEN` | Secret | fine-grained PAT，只读目标仓库 Contents |
 
 ### Claude 缓存
+
+> **本分支已移除。** 命中缓存与 thinking 编排随旧 assembler 一起退出，`ANTHROPIC_CACHE_*`
+> `ANTHROPIC_THINKING_*` `CUSTOM_ANTHROPIC_MESSAGES_PATH` 已从 wrangler.toml 删除、代码不再读取。
+> 现在 prompt cache 由客户端自己做，thinking 策略在 `/admin/gateway` 按身份配置。下表仅供历史参考。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|

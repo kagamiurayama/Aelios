@@ -11,8 +11,9 @@ import { handleHealth } from "./api/health";
 import { handleVectorDoctor, handleVectorHealth, handleVectorReindex } from "./api/debug";
 import { handleDreamHarvest, handleDreamRun, handleDreamStatus } from "./api/dream";
 import { handleGateway } from "./gateway/handler";
-import { handleGatewayAdmin, gatewayAdminPage } from "./gateway/admin";
-import { loadConfig, type Protocol } from "./gateway/config";
+import { handleGatewayAdmin, handleGatewayEnv, gatewayAdminPage } from "./gateway/admin";
+import { loadConfig, loadSettings, type Protocol } from "./gateway/config";
+import { applySettings } from "./gateway/settings";
 import { handleGuideDogChatCompletions } from "./api/guideDog";
 import {
   handleGlossaryApi,
@@ -85,11 +86,15 @@ async function runDailyMemoryDigestBatches(env: Env, namespace: string): Promise
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, deployed: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/admin/gateway") return gatewayAdminPage();
-    if (url.pathname === "/api/gateway/config") return handleGatewayAdmin(request, env);
+    // The admin endpoints report and edit the deployed values, so they run before the overrides.
+    if (url.pathname === "/api/gateway/config") return handleGatewayAdmin(request, deployed);
+    if (request.method === "GET" && url.pathname === "/api/gateway/env") return handleGatewayEnv(request, deployed);
+
+    const env = applySettings(deployed, await loadSettings(deployed));
 
     if (
       request.method === "POST" &&
@@ -219,7 +224,8 @@ export default {
     return openAiError("Not found", 404);
   },
 
-  async queue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<QueueMessage>, deployed: Env): Promise<void> {
+    const env = applySettings(deployed, await loadSettings(deployed));
     for (const message of batch.messages) {
       try {
         await handleQueueMessage(message.body, env);
@@ -231,7 +237,8 @@ export default {
     }
   },
 
-  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(controller: ScheduledController, deployed: Env, ctx: ExecutionContext): Promise<void> {
+    const env = applySettings(deployed, await loadSettings(deployed));
     const cron = controller.cron;
     const shouldRunDailyMaintenance = !cron || cron === DAILY_MAINTENANCE_CRON;
 

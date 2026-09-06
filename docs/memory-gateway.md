@@ -25,9 +25,9 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 
 | 客户端 | 填什么 |
 | --- | --- |
-| Chatbox 等 OpenAI 兼容 | Base URL `https://<host>/dalaogong/v1` |
-| Claude Code | `ANTHROPIC_BASE_URL=https://<host>/dalaogong` |
-| Codex | `model_providers` 的 `base_url = "https://<host>/dalaogong/v1"`，`wire_api = "responses"` |
+| Chatbox 等 OpenAI 兼容 | Base URL `https://<host>/companion-a/v1` |
+| Claude Code | `ANTHROPIC_BASE_URL=https://<host>/companion-a` |
+| Codex | `model_providers` 的 `base_url = "https://<host>/companion-a/v1"`，`wire_api = "responses"` |
 
 对应端点是 `/<身份>/v1/chat/completions`、`/<身份>/v1/messages`、`/<身份>/v1/responses` 和 `/<身份>/v1/models`。
 不带身份的 `/v1/...` 走该密钥的第一个身份，方便单身份使用。
@@ -75,12 +75,25 @@ Claude Code 会用主模型之外的小模型跑标题、压缩和文件判断�
 1. 使用 `feat/memory-gateway` 分支，运行 `npm ci`。测试需要 Node.js 24。
 2. 按原部署流程创建 D1、Vectorize 和 Queue，应用全部 migrations，包含 `0012_memory_gateway.sql`。`npm run deploy` 的 setup 脚本会应用远程迁移。
 3. 在 Cloudflare AI Gateway 中创建网关，将上游密钥存入 BYOK，或配置支持的 Unified Billing。默认网关 ID 为 `default`。
-4. 设置 Worker Secret `CHATBOX_API_KEY`，打开 `/admin/gateway`，使用该密钥读取、填写并保存配置。
-5. 客户端填写 `https://<host>/<身份>/v1` 和 API key，模型名随意。
+4. 在 Worker 的 Settings → Variables and Secrets 里只填一个 Secret `CHATBOX_API_KEY`（自己编的密码）。
+5. 打开 `/admin/gateway`，用该密钥读取配置，填身份、线路和环境设置并保存。
+6. 客户端填写 `https://<host>/<身份>/v1` 和同一个 API key，模型名随意。
 
 配置优先级：D1 保存的配置 > Worker `GATEWAY_CONFIG` JSON 变量 > 空配置。
 空配置没有身份，聊天请求返回配置提示，不会偷偷走旧代理。
 管理配置允许 `CHATBOX_API_KEY` / `DEBUG_API_KEY`。旧 MCP 与记忆管理权限不变；跨 namespace 手动编辑或导入记忆仍须 `DEBUG_API_KEY` 并明确填写目标 namespace。
+
+## 环境设置
+
+除了密钥，运行参数都能在 `/admin/gateway` 的「环境设置」里填，不必回 Cloudflare 的 Variables 页。
+每格留空就用部署时的默认值，输入框里的灰字就是当前生效值，右边的中文标签说明这一格是干什么的。
+
+保存后写进 D1 的 `settings`，Worker 在每个入口（HTTP、Queue、Cron）把它盖在部署变量之上，
+优先级是：`/admin/gateway` 的设置 > wrangler.toml / Dashboard 变量 > 代码默认值。
+设置有 10 秒缓存，保存后最长 10 秒全网生效。
+
+只有 `settings` 白名单里的键可写，binding 和密钥改不了。
+密钥仍然只放 Worker Secrets 和 AI Gateway BYOK，不进数据库；页面只显示每个密钥配没配。
 
 ## 配置示例
 
@@ -99,14 +112,14 @@ Claude Code 会用主模型之外的小模型跑标题、压缩和文件判断�
   },
   "identities": [
     {
-      "slug": "dalaogong", "namespace": "companion-a",
+      "slug": "companion-a", "namespace": "companion-a",
       "keys": ["CHATBOX_API_KEY"], "provider": "anthropic",
       "memory": "request", "record": true,
       "anthropicThinking": "drop_block", "maxMemoryChars": 6000,
       "models": [{ "match": "*haiku*", "memory": "off", "record": false }]
     },
     {
-      "slug": "erlaogong", "namespace": "companion-b",
+      "slug": "companion-b", "namespace": "companion-b",
       "keys": ["IM_API_KEY", "CHATBOX_API_KEY"], "provider": "openai",
       "memory": "request", "record": true, "anthropicThinking": "passthrough",
       "models": [{ "match": "*mini*", "memory": "off", "record": false }]

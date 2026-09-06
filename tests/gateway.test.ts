@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import worker from "../src/index";
-import { validateConfig } from "../src/gateway/config";
+import { invalidateSettingsCache, validateConfig } from "../src/gateway/config";
 import { appendMemory, classifyTurn, canonical } from "../src/gateway/protocol";
 import { OutputCollector, observeResponse, persistExchange, prepareExchange, dispatchExchange } from "../src/gateway/record";
 
@@ -35,6 +35,7 @@ beforeEach(() => {
     try { const results = []; for (const statement of statements) results.push(await statement.run()); sqlite.exec("COMMIT"); return results; }
     catch (e) { sqlite.exec("ROLLBACK"); throw e; }
   } };
+  invalidateSettingsCache();
   calls = []; queue = []; pending = [];
   ctx = { waitUntil(p: Promise<unknown>) { pending.push(p); } };
   env = { DB: db, CHATBOX_API_KEY: "owner-key", IM_API_KEY: "im-key", MEMORY_MCP_API_KEY: "mcp-key",
@@ -228,4 +229,26 @@ test("Queue failure falls back to D1; successful duplicate cannot overwrite comp
   await persistExchange(env, { ...queue[0], assistantText: "different retry" });
   assert.equal(count("gateway_exchanges"), 1); assert.equal(count("messages"), 2);
   assert.equal(sqlite.prepare("SELECT assistant_text FROM gateway_exchanges").get()!.assistant_text, "你好，记住了。");
+});
+
+test("settings edited in the admin page override deployment vars everywhere", async () => {
+  const withSettings = { ...config(), settings: { CHAT_MODEL: "chosen-in-admin", MEMORY_FILTER_MAX_OUTPUT: " 5 ", DREAM_TIME_ZONE: "" } };
+  assert.equal((await worker.fetch(request("/api/gateway/config", withSettings, {}, "PUT"), env, ctx)).status, 200);
+  invalidateSettingsCache();
+  // Blank stays unset, whitespace is trimmed, and the value reaches unrelated handlers.
+  const saved = JSON.parse((await run("/api/gateway/config")).text).settings;
+  assert.deepEqual(saved, { CHAT_MODEL: "chosen-in-admin", MEMORY_FILTER_MAX_OUTPUT: "5" });
+  const health = JSON.parse((await run("/health")).text);
+  assert.equal(health.missing_optional_text_vars.includes("CHAT_MODEL"), false);
+  assert.equal(health.missing_optional_text_vars.includes("VISION_MODEL"), true);
+  // The env report shows the saved value next to what the Worker was deployed with.
+  env.VISION_MODEL = "deployed-vision";
+  const report = JSON.parse((await run("/api/gateway/env")).text);
+  const items = report.groups.flatMap((g: any) => g.items);
+  assert.deepEqual(items.find((i: any) => i.name === "CHAT_MODEL").value, "chosen-in-admin");
+  assert.deepEqual(items.find((i: any) => i.name === "VISION_MODEL"), { name: "VISION_MODEL", label: "看图模型", hint: "", value: "", deployed: "deployed-vision" });
+  assert.equal(report.secrets.find((x: any) => x.name === "CHATBOX_API_KEY").present, true);
+  assert.equal(report.secrets.find((x: any) => x.name === "DEBUG_API_KEY").present, false);
+  assert.equal((await worker.fetch(request("/api/gateway/env", undefined, { authorization: "Bearer im-key" }), env, ctx)).status, 401);
+  assert.throws(() => validateConfig({ ...config(), settings: { DB: "hijacked" } }), /Unknown setting/);
 });

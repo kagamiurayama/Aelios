@@ -1,4 +1,5 @@
 import type { AuthResult, Env } from "../types";
+import { validateSettings } from "./settings";
 
 export const PROTOCOLS = ["chat", "messages", "responses"] as const;
 export type Protocol = typeof PROTOCOLS[number];
@@ -36,6 +37,7 @@ export interface GatewayConfig {
   version: 2;
   providers: Record<string, Provider>;
   identities: Identity[];
+  settings?: Record<string, string>;
 }
 export interface ResolvedModel {
   provider: string;
@@ -86,6 +88,7 @@ export function validateConfig(value: unknown): GatewayConfig {
       }
     }
   }
+  value.settings = validateSettings(value.settings);
   check(Array.isArray(value.identities), "identities must be an array");
   const slugs = new Set<string>();
   for (const identity of value.identities) {
@@ -114,11 +117,25 @@ export function validateConfig(value: unknown): GatewayConfig {
   return value as unknown as GatewayConfig;
 }
 
+let settingsCache: { value: Record<string, string>; expires: number } | null = null;
+export function invalidateSettingsCache(): void { settingsCache = null; }
+/** Read on every entry point, so keep it cheap; saved edits land within ten seconds. */
+export async function loadSettings(env: Env): Promise<Record<string, string>> {
+  if (settingsCache && settingsCache.expires > Date.now()) return settingsCache.value;
+  let value: Record<string, string> = {};
+  try {
+    const row = await env.DB.prepare("SELECT config_json FROM gateway_config WHERE id = 1").first<{ config_json: string }>();
+    const raw = row?.config_json || env.GATEWAY_CONFIG;
+    if (raw) value = validateSettings(JSON.parse(raw).settings);
+  } catch { value = {}; }
+  settingsCache = { value, expires: Date.now() + 10_000 };
+  return value;
+}
 export async function loadConfig(env: Env): Promise<GatewayConfig> {
   const row = await env.DB.prepare("SELECT config_json FROM gateway_config WHERE id = 1").first<{ config_json: string }>();
   if (row) return validateConfig(JSON.parse(row.config_json));
   if (env.GATEWAY_CONFIG) return validateConfig(JSON.parse(env.GATEWAY_CONFIG));
-  return { version: 2, providers: {}, identities: [] };
+  return { version: 2, providers: {}, identities: [], settings: {} };
 }
 export function allowedIdentities(config: GatewayConfig, auth: AuthResult): Identity[] {
   if (!auth.profile.scopes.includes("chat:proxy")) return [];
