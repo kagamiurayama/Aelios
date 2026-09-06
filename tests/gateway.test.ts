@@ -384,6 +384,10 @@ test("every CF paste form routes chat to compat and native protocols to provider
       { url: `${gw}/anthropic/v1/messages`, model: "claude-opus-5", auth: "cf-aig" }, address);
     assert.deepEqual(routeFor(resolved, "responses", "openai/gpt-5.6-luna"),
       { url: `${gw}/openai/responses`, model: "gpt-5.6-luna", auth: "cf-aig" }, address);
+    assert.deepEqual(routeFor(resolved, "messages", "custom-navy/claude-opus-5"),
+      { url: `${gw}/custom-navy/messages`, model: "claude-opus-5", auth: "cf-aig" }, address);
+    assert.deepEqual(routeFor(resolved, "responses", "custom-navy/gpt-5.1"),
+      { url: `${gw}/custom-navy/responses`, model: "gpt-5.1", auth: "cf-aig" }, address);
   }
 });
 

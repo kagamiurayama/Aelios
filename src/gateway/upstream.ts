@@ -92,8 +92,8 @@ export interface UpstreamRoute {
 /**
  * BYOK lives on the gateway surface; CF REST spends Unified credits only.
  * chat → compat (every provider). messages / responses → the provider's native
- * endpoint with its own path shape (`/v1/messages`; openai's responses drops the
- * v1 per CF docs). Unsupported combinations fail honestly at the provider.
+ * endpoint with its own path shape (`/v1/messages`; custom providers mount without
+ * the v1, and openai's responses drops it per CF docs).
  */
 export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: string): UpstreamRoute {
   if (!resolved.accountId) return { url: `${resolved.base}/${PATHS[protocol]}`, model, auth: "bearer" };
@@ -104,8 +104,9 @@ export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: 
   const native = slash > 0 ? model.slice(slash + 1) : model;
   if (!provider) throw new UpstreamRouteError(
     `"${model}" has no provider prefix; use the author/model form so the BYOK endpoint is known.`);
-  const path = protocol === "messages" ? `/v1/messages`
-    : provider === "openai" ? `/responses` : `/v1/responses`;
+  const custom = provider.startsWith("custom-");
+  const path = protocol === "messages" ? (custom ? `/messages` : `/v1/messages`)
+    : provider === "openai" || custom ? `/responses` : `/v1/responses`;
   return { url: `${gw}/${provider}${path}`, model: native, auth: "cf-aig" };
 }
 
