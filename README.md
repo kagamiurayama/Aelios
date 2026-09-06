@@ -1,10 +1,10 @@
 # Aelios
 
 > **`feat/memory-gateway` 开发分支**：主入口改为 Cloudflare 原生三协议记忆网关。
-> 请先看 [网关配置与接入](docs/memory-gateway.md)，从 `/admin/gateway` 配置身份和线路。
-> 每个身份一个地址 `https://<host>/<身份>/v1`，模型名原样透传给上游，fallback 交给 CF Dynamic Routes。
-> Worker Settings 只需要填 `CHATBOX_API_KEY` 一个密钥，其余参数在 `/admin/gateway` 的「环境设置」里填，下文的变量表仅供查阅。
-> `/v1/chat/completions` 不再使用旧 assembler / 缓存编排，新增 `/v1/messages` 和 `/v1/responses`。
+> 请先看 [网关配置与接入](docs/memory-gateway.md)，配置入口：`/admin` 的「设置」页（网关卡片），或独立页 `/admin/gateway`。
+> 每个身份一个地址 `https://<host>/<身份>/v1`，模型名按 `provider/模型` 原样透传。
+> CF 上游的协议路由：chat 走 compat（全 provider，BYOK 生效）；messages 走 `…/{provider}/v1/messages`，responses 走 `…/{provider}/v1/responses`（openai 特例无 v1）——都走各 provider 原生端点，模型名自动剥前缀；模型列表走 compat 目录。
+> Worker Settings 只需要 `CHATBOX_API_KEY` + `CLOUDFLARE_API_TOKEN` 两把密钥，其余参数在面板的「环境设置」里填，下文的变量表仅供查阅。
 > 下文旧聊天接入说明仅供历史参考，本分支以新文档为准；旧记忆管理与 MCP 仍保留。
 
 > 给 AI 装一颗跨窗口的长期记忆大脑。换窗口、换客户端、换模型，记忆跟着你走。
@@ -93,11 +93,15 @@ Aelios 是一个跑在 Cloudflare 上的记忆服务。你的 AI 客户端（Cha
 
 ### 3. 接客户端
 
-以 Chatbox 为例：
+先在 `/admin` 的「设置」页（或 `/admin/gateway`）配好上游地址和至少一位身份（老公），然后按客户端选协议：
 
-- **Base URL:** `https://<你的 Worker 地址>/v1`
-- **API Key:** 你设的 `CHATBOX_API_KEY`
-- **Model:** `companion`
+| 客户端 | 地址 | 协议 |
+|---|---|---|
+| Chatbox 等 OpenAI 兼容客户端 | `https://<Worker 地址>/<身份>/v1` | chat/completions |
+| Claude Code | `ANTHROPIC_BASE_URL=https://<Worker 地址>/<身份>` | messages |
+| Codex | `base_url = https://<Worker 地址>/<身份>/v1`，并设 `wire_api = "responses"` | responses |
+
+**API Key** 都填你设的 `CHATBOX_API_KEY`。**Model** 按 `provider/模型` 写真名（如 `anthropic/claude-opus-5`、`openrouter/anthropic/claude-haiku-4.5`)，身份里登记的主模型才有记忆，其余模型安静透传。不带身份名的 `/v1` 走这把钥匙的第一位身份。
 
 试着说："请记住：我的测试暗号是苹果星星-0428。" 过一会儿问："我的测试暗号是什么？" 答出来就通了。
 
@@ -123,21 +127,13 @@ https://<你的 Worker 地址>/admin
 
 ## 想要完整聊天网关（可选）
 
-只想要记忆库可以跳过这步。想让 Aelios 当聊天转发网关：
+只想要记忆库可以跳过这步。想让 Aelios 当三协议聊天网关（BYOK 计费走你自己的 provider key）:
 
-1. Cloudflare → AI → AI Gateway → 建一个 gateway，复制地址。
-2. 在 AI Gateway 的 Provider Keys 里加你的模型 API key。
-3. 回 Worker → Variables and Secrets 加：
+1. Cloudflare → AI → AI Gateway → 建一个 gateway;BYOK 的 provider key 存在它名下（Provider Keys / Custom Providers)。
+2. 回 Worker → Variables and Secrets 加一把 Secret:`CLOUDFLARE_API_TOKEN`(CF API token,AI Gateway 读写权限）。
+3. 打开 `/admin` 的「设置」页（或 `/admin/gateway`)，上游地址填 **32 位账号 ID**,Gateway ID 在「环境设置」里改（默认 `default`)，再加身份（老公）。
 
-| 变量名 | 填什么 |
-|---|---|
-| `AI_GATEWAY_BASE_URL` | 刚复制的 Gateway Endpoint |
-| `CF_AIG_TOKEN` | AI Gateway 调用 token |
-
-保存重新部署。
-
-> ⚠️ **用 OpenRouter 调 Claude，必须走「自定义 provider」加 key，不能用官方 provider 路径。**
-> 官方 provider 路径会把请求按 Anthropic 原生格式发，和 OpenRouter 的 OpenAI 兼容格式打架，导致缓存失效、格式错乱。在 AI Gateway 里选 custom-providers 加 OpenRouter key，参考：`https://dash.cloudflare.com/?to=/:account/ai/ai-gateway/custom-providers`。
+协议路由网关自己分得清：chat 全 provider 走 compat;messages / responses 走各 provider 的原生端点。BYOK 全程生效——REST 面只花 Unified 额度，本设计不走它。
 
 ## 给 Claude Code / Codex 加记忆（可选）
 
