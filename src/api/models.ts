@@ -2,20 +2,8 @@ import { authenticate } from "../auth/apiKey";
 import type { Env } from "../types";
 import { json, openAiError } from "../utils/json";
 import { findIdentity, loadConfig } from "../gateway/config";
+import { catalogUrl } from "../gateway/upstream";
 
-
-/** Models catalog URL for any accepted address form: account ID, legacy gateway URL
- *  (with or without /compat), legacy REST base, or a custom OpenAI-compatible base. */
-function catalogUrl(address: string, gatewayId: string): string {
-  if (/^[a-f0-9]{32}$/i.test(address))
-    return `https://gateway.ai.cloudflare.com/v1/${address}/${gatewayId}/compat/models`;
-  const base = address.replace(/\/+$/, "");
-  const gw = base.match(/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/([a-f0-9]{32})\/([^/]+?)(?:\/compat)?$/i);
-  if (gw) return `https://gateway.ai.cloudflare.com/v1/${gw[1]}/${gw[2]}/compat/models`;
-  const rest = base.match(/^https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/([a-f0-9]{32})\/ai\/v1$/i);
-  if (rest) return `https://gateway.ai.cloudflare.com/v1/${rest[1]}/${gatewayId}/compat/models`;
-  return `${base}/models`;
-}
 /** The upstream owns the real catalog; local main models are only hints when it cannot answer. */
 export async function handleModels(request: Request, env: Env, slug: string | null = null): Promise<Response> {
   const auth = await authenticate(request, env);
@@ -33,7 +21,7 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
   const address = config.upstream?.address?.trim() || env.AI_GATEWAY_BASE_URL || env.CLOUDFLARE_ACCOUNT_ID || "";
   let reason = !token ? "no-token" : !address ? "no-address" : "";
   if (!reason) {
-    const url = catalogUrl(address, env.AI_GATEWAY_ID || "default");
+    const url = catalogUrl(env, config);
     try {
       const upstream = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: request.signal });
       if (upstream.ok) return new Response(upstream.body, { status: 200, headers: {

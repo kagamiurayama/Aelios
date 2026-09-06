@@ -24,7 +24,7 @@ export const SETTINGS: SettingSpec[] = [
 
   { group: "数据留存", name: "MESSAGES_RETENTION_DAYS", label: "原始对话保留天数", hint: "Dream 抽完记忆后，原文留几天" },
 
-  { group: "模型与线路", name: "AI_GATEWAY_ID", label: "默认 AI Gateway ID", hint: "线路里没写 gateway 时用它" },
+  { group: "模型与线路", name: "AI_GATEWAY_ID", label: "默认 AI Gateway ID", hint: "会写进上游 URL。自定义 Provider 和动态路由必须填对，不能只靠账户默认 Gateway" },
   { group: "模型与线路", name: "MEMORY_RERANKER_MODEL", label: "记忆重排模型" },
   { group: "模型与线路", name: "VISION_MODEL", label: "看图模型" },
   { group: "模型与线路", name: "CHAT_MODEL", label: "导盲犬入口的模型", hint: "只给 /v1/guide-dog 用，聊天走网关身份" },

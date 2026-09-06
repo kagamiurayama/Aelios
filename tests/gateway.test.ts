@@ -6,6 +6,7 @@ import { timingSafeEqual } from "node:crypto";
 import worker from "../src/index";
 import { invalidateSettingsCache, validateConfig } from "../src/gateway/config";
 import { appendMemory, classifyTurn, canonical } from "../src/gateway/protocol";
+import { upstreamBaseUrl } from "../src/gateway/upstream";
 import { OutputCollector, observeResponse, persistExchange, prepareExchange, dispatchExchange } from "../src/gateway/record";
 
 // Test actual production modules and SQL, replacing only the external HTTP call.
@@ -331,6 +332,33 @@ test("upstream forwards the panel Gateway ID", async () => {
   env.AI_GATEWAY_ID = "panel-gateway";
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
   assert.equal(calls[0].headers["cf-aig-gateway-id"], "panel-gateway");
+});
+
+test("CF account ID puts the Gateway ID into the Unified compat URL for chat", () => {
+  const acct = "b".repeat(32);
+  const envLike = { AI_GATEWAY_ID: "my-gw" } as any;
+  const cfg = { version: 3 as const, upstream: { address: acct }, identities: [] };
+  assert.equal(
+    upstreamBaseUrl(envLike, cfg, "chat"),
+    `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat`
+  );
+  assert.equal(
+    upstreamBaseUrl(envLike, cfg, "messages"),
+    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`
+  );
+  assert.equal(
+    upstreamBaseUrl(envLike, { ...cfg, upstream: { address: `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1` } }, "chat"),
+    `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat`
+  );
+});
+
+test("chat to a CF account uses the compat host, not the REST default gateway", async () => {
+  const acct = "c".repeat(32);
+  env.AI_GATEWAY_ID = "custom-gw";
+  setConfig({ ...config(), upstream: { address: acct } });
+  await run("/v1/chat/completions", { model: "custom-foo/bar", messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${acct}/custom-gw/compat/chat/completions`);
+  assert.equal(calls[0].headers["cf-aig-gateway-id"], "custom-gw");
 });
 
 test("settings edited in the admin page override deployment vars everywhere", async () => {
