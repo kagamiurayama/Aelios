@@ -67,8 +67,8 @@ details{margin-top:8px}summary{cursor:pointer;color:#a6b4c3}
 <section><label>管理钥匙（Worker 设置里的 CHATBOX_API_KEY，只留在本页）<input id="key" type="password" autocomplete="off"></label>
 <div class="row"><button id="load">读取</button><button id="save">保存</button></div><div id="status" role="status" aria-live="polite"></div></section>
 
-<section><h2>连接 Cloudflare</h2>
-<label>CF 账号 ID<input id="cfAddress" placeholder="32 位账号 ID，也可以贴完整地址"><div class="hint">在 CF 仪表盘右侧栏能看到。令牌不在这里填，去 Worker 的 Settings → Variables and Secrets 加一把 <code>CLOUDFLARE_API_TOKEN</code>，一把管所有，不用配 BYOK。</div></label></section>
+<section><h2>上游连接</h2>
+<label>上游地址<input id="cfAddress" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1"><div class="hint">填账号 ID 就走 Cloudflare(仪表盘右侧栏能看到);填完整地址就走自定义网关。令牌不在这里填,去 Worker 的 Settings → Variables and Secrets 加一把 <code>CLOUDFLARE_API_TOKEN</code>,放上游的钥匙,一把管所有。</div></label></section>
 
 <section><h2>老公们</h2><p class="hint">每位三格：名字、主模型、钥匙。主模型支持 <code>*</code> 通配，写不写 <code>anthropic/</code> 前缀都能认。</p>
 <div id="identities"></div><button id="addIdentity" class="ghost">+ 添加一位</button></section>
