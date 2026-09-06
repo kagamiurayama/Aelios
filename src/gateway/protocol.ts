@@ -17,6 +17,20 @@ export function validateBody(body: unknown, protocol: Protocol): asserts body is
   if (!Array.isArray(items) || !items.every(object)) throw new Error(protocol === "responses" ? "input must be a string or item array" : "messages must be an array of objects");
 }
 export interface Turn { kind: "human" | "tool" | "auxiliary"; text: string; index: number }
+export function recentHumanTexts(body: Body, protocol: Protocol, limit = 4): string[] {
+  const items = inputItems(body, protocol) ?? [];
+  const texts: string[] = [];
+  for (let i = items.length - 1; i >= 0 && texts.length < limit; i--) {
+    const item = items[i];
+    if (!object(item) || item.role !== "user") continue;
+    if (item.type && !["message", "input_message"].includes(item.type)) continue;
+    const text = visibleText(item.content).trim();
+    if (!text) continue;
+    texts.push(text);
+  }
+  return texts.reverse();
+}
+
 export function classifyTurn(body: Body, protocol: Protocol, auxiliary = false): Turn {
   const items = inputItems(body, protocol);
   const index = items.length - 1;

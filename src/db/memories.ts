@@ -315,12 +315,35 @@ export async function softDeleteMemory(
   });
 }
 
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
+function lexicalHitScore(content: string, query: string, tokens: string[]): number {
+  const lower = content.toLowerCase();
+  const queryLower = query.toLowerCase();
+  const exact = queryLower.length >= 2 && lower.includes(queryLower) ? 0.15 : 0;
+  if (tokens.length === 0) return exact ? 0.75 : 0.5;
+  let hits = 0;
+  for (const token of tokens) {
+    if (token && lower.includes(token.toLowerCase())) hits += 1;
+  }
+  return Math.min(0.95, 0.35 + (hits / tokens.length) * 0.5 + exact);
+}
+
 export async function searchMemoriesByText(
   db: D1Database,
-  input: { namespace: string; query: string; types?: string[]; limit: number; includeHistory?: boolean }
+  input: {
+    namespace: string;
+    query: string;
+    types?: string[];
+    limit: number;
+    includeHistory?: boolean;
+    tokens?: string[];
+  }
 ): Promise<Array<MemoryRecord & { score: number }>> {
   const query = input.query.trim().replace(/\s+/g, " ").slice(0, 500);
-  const like = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
+  const tokens = [...new Set((input.tokens ?? []).map((token) => token.trim()).filter((token) => token.length >= 2))].slice(0, 8);
   // LMC-5: default excludes superseded. includeHistory allows status/version_status=superseded
   // (vectors for superseded rows are deleted on supersede, so text path is the history fallback).
   let sql: string;
@@ -333,9 +356,19 @@ export async function searchMemoriesByText(
   }
   const binds: unknown[] = [input.namespace];
 
-  if (query) {
-    sql += " AND (content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR type LIKE ? ESCAPE '\\')";
+  const clauses: string[] = [];
+  if (query.length >= 2) {
+    const like = `%${escapeLike(query)}%`;
+    clauses.push("(content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR type LIKE ? ESCAPE '\\')");
     binds.push(like, like, like, like);
+  }
+  for (const token of tokens) {
+    const like = `%${escapeLike(token)}%`;
+    clauses.push("(content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')");
+    binds.push(like, like);
+  }
+  if (clauses.length > 0) {
+    sql += ` AND (${clauses.join(" OR ")})`;
   }
 
   if (input.types && input.types.length > 0) {
@@ -357,10 +390,9 @@ export async function searchMemoriesByText(
     return [];
   }
 
-  const lowered = query.toLowerCase();
   return (result.results ?? []).map((record) => ({
     ...record,
-    score: lowered && record.content.toLowerCase().includes(lowered) ? 0.75 : 0.5
+    score: lexicalHitScore(`${record.content}\n${record.summary ?? ""}`, query, tokens)
   }));
 }
 
