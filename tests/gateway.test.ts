@@ -156,6 +156,18 @@ test("model catalog falls back to main-model hints when the upstream cannot answ
   assert.deepEqual(JSON.parse(offline.text).data.map((m: any) => m.id), ["partner", "listed-model"]);
   assert.equal(offline.response.headers.get("x-aelios-models"), "fallback:no-token");
 });
+test("legacy CF address forms still reach the compat catalog", async () => {
+  const acct = "a".repeat(32);
+  for (const address of [acct, `https://gateway.ai.cloudflare.com/v1/${acct}/default`,
+    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`,
+    `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`]) {
+    setConfig({ ...config(), upstream: { address } }); calls = [];
+    const models = await run("/v1/models");
+    assert.equal(models.response.headers.get("x-aelios-models"), "upstream", address);
+    assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/models`);
+  }
+});
+
 
 test("auxiliary and incomplete replies do not become Dream sources", async () => {
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Generate title" }] }, { "x-aelios-purpose": "auxiliary" });
