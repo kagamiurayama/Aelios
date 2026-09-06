@@ -283,13 +283,30 @@ test("missing CF token fails loudly instead of leaking another credential", asyn
   assert.match(JSON.parse(text).error.message, /CLOUDFLARE_API_TOKEN/);
   assert.equal(queue[0].completion, "failed");
 });
-test("thinking passthrough skips memory; explicit disabled thinking allows injection", async () => {
+test("thinking passthrough keeps thinking and still injects memory", async () => {
   precious("partner-a", "Cloudflare fan");
   setConfig(config([{ ...identity(), anthropicThinking: "passthrough" }]));
   const body = { model: "partner", messages: [{ role: "user", content: "Hi Cloudflare" }], thinking: { type: "adaptive" } };
-  assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "thinking-passthrough");
-  assert.deepEqual(calls[0].query.thinking, body.thinking); assert.deepEqual(calls[0].query.messages, body.messages);
+  assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "injected");
+  assert.deepEqual(calls[0].query.thinking, body.thinking);
+  assert.ok(calls[0].query.messages[0].content.includes("Cloudflare fan"));
   assert.equal((await run("/v1/messages", { ...body, thinking: { type: "disabled" } })).response.headers.get("x-aelios-memory"), "injected");
+});
+test("top-level cache_control is hoisted onto the last system block", async () => {
+  const cc = { type: "ephemeral" };
+  const body = { model: "partner", max_tokens: 16, cache_control: cc, system: [{ type: "text", text: "persona" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "Hi", cache_control: cc }] }] };
+  const { response } = await run("/v1/messages", body);
+  assert.equal(response.status, 200);
+  assert.equal(calls[0].query.cache_control, undefined);
+  assert.deepEqual(calls[0].query.system[0].cache_control, cc);
+  assert.deepEqual(calls[0].query.messages[0].content[0].cache_control, cc);
+  const stringSystem = { model: "partner", max_tokens: 16, cache_control: cc, system: "persona", messages: [{ role: "user", content: "Hi" }] };
+  await run("/v1/messages", stringSystem);
+  assert.deepEqual(calls[1].query.system, [{ type: "text", text: "persona", cache_control: cc }]);
+  const noSystem = { model: "partner", max_tokens: 16, cache_control: cc, messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }] };
+  await run("/v1/messages", noSystem);
+  assert.deepEqual(calls[2].query.messages[0].content[0].cache_control, cc);
 });
 test("Queue failure falls back to D1; successful duplicate cannot overwrite complete record", async () => {
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });

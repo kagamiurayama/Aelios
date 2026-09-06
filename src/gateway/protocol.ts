@@ -58,6 +58,33 @@ export function appendMemory(body: Body, protocol: Protocol, patch: string): Bod
   else last.content = [...(last.content || []), { type: protocol === "responses" ? "input_text" : "text", text: patch }];
   return copy;
 }
+// rikkahub-style top-level cache_control is not valid Anthropic API (Vertex answers
+// unrecognizedProperty). Hoist it onto the last system text block, the classic prefix
+// breakpoint; fall back to the last user text block; drop it when nowhere legal exists.
+export function sanitizeCacheControl(body: Body, protocol: Protocol): void {
+  if (protocol !== "messages" || body.cache_control === undefined) return;
+  const cc = body.cache_control;
+  delete body.cache_control;
+  if (!object(cc)) return;
+  const system = body.system;
+  if (typeof system === "string" && system) {
+    body.system = [{ type: "text", text: system, cache_control: cc }];
+    return;
+  }
+  if (Array.isArray(system)) {
+    for (let i = system.length - 1; i >= 0; i--) {
+      const block = system[i];
+      if (object(block) && !block.cache_control) { block.cache_control = cc; return; }
+    }
+  }
+  const last = body.messages?.[body.messages.length - 1];
+  if (last?.role === "user" && Array.isArray(last.content)) {
+    for (let i = last.content.length - 1; i >= 0; i--) {
+      const block = last.content[i];
+      if (object(block) && block.type === "text" && !block.cache_control) { block.cache_control = cc; return; }
+    }
+  }
+}
 // Encrypted reasoning stays allowed; only server-owned history breaks request-only memory.
 export function hasServerState(body: Body, protocol: Protocol): boolean {
   return protocol === "responses" && !!(body.previous_response_id || body.conversation ||

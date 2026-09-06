@@ -10,7 +10,7 @@ import type { Env } from "../types";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 import { findIdentity, identityNamespace, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
-import { appendMemory, classifyTurn, hasServerState, recentHumanTexts, validateBody, type Body } from "./protocol";
+import { appendMemory, classifyTurn, hasServerState, recentHumanTexts, sanitizeCacheControl, validateBody, type Body } from "./protocol";
 import { dispatchExchange, persistHumanUtterance, observeResponse, prepareExchange } from "./record";
 import { callGatewayUpstream, UpstreamRouteError } from "./upstream";
 
@@ -151,7 +151,7 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
   let memoryStatus = !main ? "off" : turn.kind !== "human" ? "skipped" : "empty";
   let rememberStatus = "none";
   const recallId = newId("rcl");
-  const thinkingCompatible = protocol !== "messages" || identity.anthropicThinking === "drop_block" || body.thinking?.type === "disabled";
+  sanitizeCacheControl(body, protocol);
   const exchange = main ? await prepareExchange(request, body, identity, protocol, turn, auth.profile.source) : null;
   if (exchange && main && turn.kind === "human" && turn.text) {
     try {
@@ -162,7 +162,7 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       console.error("gateway human utterance persist failed", { identity: identity.slug, error });
     }
   }
-  if (main && turn.kind === "human" && turn.text && thinkingCompatible) {
+  if (main && turn.kind === "human" && turn.text) {
     try {
       const prior = recentHumanTexts(body, protocol).slice(0, -1).slice(-3);
       patch = await recallPatch(env, identity, turn.text, ctx, prior, {
@@ -175,7 +175,7 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       memoryStatus = "unavailable";
       console.error("gateway recall unavailable", { identity: identity.slug, error });
     }
-  } else if (!thinkingCompatible && main) memoryStatus = "thinking-passthrough";
+  }
   const payload = appendMemory(body, protocol, patch);
   if (protocol === "responses" && main) payload.store = false;
   try {

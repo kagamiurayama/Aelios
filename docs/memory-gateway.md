@@ -76,7 +76,7 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 
 ### Anthropic thinking
 
-- `passthrough`（默认）：不修改 thinking；思考未显式关闭时跳过记忆注入，响应头标记 `thinking-passthrough`。
+- `passthrough`（默认）：不修改 thinking；记忆照常注入（召回片段只追加在最后一轮 user 消息尾部，不影响历史 thinking 块的前缀签名）。
 - `drop_block`：在每次请求（含工具续轮）合并 `thinking.block_binding.prefix_mismatch_behavior: "drop_block"`，
   以及 `thinking-binding-controls-2026-08-01` beta header。仅适用于支持该 beta 的线路，会牺牲部分思考连续性。
 - 显式 `thinking.type: "disabled"`：直接临时注入，不添加该 beta。
@@ -121,6 +121,9 @@ Anthropic token counting。使用这些额外端点的客户端需要后续适�
 本网关一次调用一个上游，本地不做主备。
 旧 assembler、缓存断点/滚动缓存已退出对外入口。新网关不重排前缀，也不添加 prompt cache 断点：
 召回内容追加在对话末尾，各家自己的 prompt 缓存照常命中。
+唯一的断点触碰是修复性的：客户端把 `cache_control` 放在请求顶层（Anthropic API 不允许，Vertex 直接
+400 `unrecognizedProperty`）时，提升到末尾 system 文本块上（无 system 则落到末尾 user 文本块），
+客户端已有的块级断点一律不动。
 响应头 `x-aelios-identity/memory/provider/model` 用于诊断；实际模型与 Provider 优先读取 `cf-aig-model/provider`。
 
 ## 验证与下一步
