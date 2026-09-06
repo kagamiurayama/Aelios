@@ -292,7 +292,7 @@ test("a topical follow-up does not inject the previous relationship precious", a
     ]
   });
   assert.equal(response.headers.get("x-aelios-memory"), "empty");
-  assert.doesNotMatch(JSON.stringify(calls[0].query.messages), /陪伴|关系记忆|喜欢 Cloudflare/);
+  assert.doesNotMatch(JSON.stringify(calls[0].query.messages), /Aelios memory reference|关系记忆|喜欢 Cloudflare/);
 });
 
 test("please-remember writes the original words into long-term memory", async () => {
