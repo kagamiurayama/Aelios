@@ -30,6 +30,7 @@ test("claimed source ids that are not in the day's transcript are dropped", () =
     groundedSourceIds(["msg_1", "msg_fake", "msg_1"], ["msg_1", "msg_2"]),
     ["msg_1"]
   );
+  assert.deepEqual(groundedSourceIds(["msg_fake"], ["msg_1"]), []);
 });
 
 test("diary JSON keeps title/summary and reads source_message_ids", () => {

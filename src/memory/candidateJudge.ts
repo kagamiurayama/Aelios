@@ -2,7 +2,7 @@
 // 抽取器把低置信度候选塞进 memory_candidates，默认全部等人工在后台点 approve/discard。
 // 这个模块加一轮自动裁判：明显靠谱的自动 approve 入库，明显不靠谱/编造的自动 discard，
 // 只有真正模棱两可的才留给人工——把"每条都要看"变成"只看有分歧的"。
-// 默认关闭 (CANDIDATE_JUDGE_ENABLED !== "true" 时零开销)，开启后由 scheduled 在抽取批次后跑一轮。
+// 默认开启 (CANDIDATE_JUDGE_ENABLED === "false" 时关闭)。Dream 抽完候选后由 cron / 手动入口跑一轮。
 
 import { getMessagesByIds } from "../db/messages";
 import {
@@ -214,7 +214,7 @@ export async function runCandidateJudge(
   namespace: string,
   options: { limit?: number } = {}
 ): Promise<JudgeRunResult> {
-  if (env.CANDIDATE_JUDGE_ENABLED !== "true") {
+  if (env.CANDIDATE_JUDGE_ENABLED === "false") {
     return { ran: false, judged: 0, approved: 0, discarded: 0, kept: 0, failed: 0, reason: "judge_disabled" };
   }
 

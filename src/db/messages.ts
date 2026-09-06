@@ -150,7 +150,7 @@ export async function getMessagesByIds(
       `SELECT id, conversation_id, namespace, role, content, source, created_at
        FROM messages
        WHERE namespace = ? AND id IN (${placeholders})
-       ORDER BY created_at ASC`
+       ORDER BY created_at ASC, id ASC`
     )
     .bind(input.namespace, ...input.ids)
     .all<MessageRecord>();
@@ -200,11 +200,26 @@ export async function listMessagesByNamespace(
     binds.push(afterCreatedAt);
   }
 
-  sql += ` ORDER BY created_at ASC LIMIT ?`;
+  sql += ` ORDER BY created_at ASC, id ASC LIMIT ?`;
   binds.push(limit);
 
   const result = await db.prepare(sql).bind(...binds).all<MessageRecord>();
   return result.results ?? [];
+}
+
+function appendAfterCursor(
+  sql: string,
+  binds: unknown[],
+  afterCreatedAt?: string | null,
+  afterId?: string | null
+): string {
+  if (!afterCreatedAt) return sql;
+  if (afterId) {
+    binds.push(afterCreatedAt, afterCreatedAt, afterId);
+    return `${sql} AND (created_at > ? OR (created_at = ? AND id > ?))`;
+  }
+  binds.push(afterCreatedAt);
+  return `${sql} AND created_at > ?`;
 }
 
 export async function listMessagesByNamespaceInRange(
@@ -214,6 +229,7 @@ export async function listMessagesByNamespaceInRange(
     startCreatedAt: string;
     endCreatedAt: string;
     afterCreatedAt?: string | null;
+    afterId?: string | null;
     limit: number;
   }
 ): Promise<MessageRecord[]> {
@@ -224,13 +240,8 @@ export async function listMessagesByNamespaceInRange(
                AND created_at >= ?
                AND created_at < ?`;
   const binds: unknown[] = [input.namespace, input.startCreatedAt, input.endCreatedAt];
-
-  if (input.afterCreatedAt) {
-    sql += ` AND created_at > ?`;
-    binds.push(input.afterCreatedAt);
-  }
-
-  sql += ` ORDER BY created_at ASC LIMIT ?`;
+  sql = appendAfterCursor(sql, binds, input.afterCreatedAt, input.afterId);
+  sql += ` ORDER BY created_at ASC, id ASC LIMIT ?`;
   binds.push(input.limit);
 
   const result = await db.prepare(sql).bind(...binds).all<MessageRecord>();

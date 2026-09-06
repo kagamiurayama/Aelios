@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import { captureRememberNow } from "../memory/rememberNow";
 import { sha256Hex } from "../utils/hash";
 import { getSseData, splitSseEvents } from "../utils/sseParser";
 import { identityNamespace, object, type Identity, type Protocol } from "./config";
@@ -66,6 +67,20 @@ export async function persistExchange(env: Env, e: GatewayExchange): Promise<voi
     if (e.completion === "complete" && e.assistantText) addMessage(e.id + ":assistant", "assistant", e.assistantText);
   }
   await env.DB.batch(statements);
+  if (e.kind === "human" && e.userText && e.completion !== "truncated") {
+    try {
+      const remembered = await captureRememberNow(env, {
+        namespace: e.namespace,
+        userText: e.userText,
+        messageId: e.userId
+      });
+      if (remembered.wrote) {
+        console.log("remember-now wrote memory", { namespace: e.namespace, id: remembered.id });
+      }
+    } catch (error) {
+      console.error("remember-now failed", { namespace: e.namespace, error });
+    }
+  }
 }
 export async function dispatchExchange(env: Env, exchange: GatewayExchange): Promise<void> {
   if (env.MEMORY_QUEUE) {

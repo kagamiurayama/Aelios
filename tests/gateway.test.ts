@@ -280,6 +280,43 @@ test("Queue failure falls back to D1; successful duplicate cannot overwrite comp
   assert.equal(sqlite.prepare("SELECT assistant_text FROM gateway_exchanges").get()!.assistant_text, "你好，记住了。");
 });
 
+test("a topical follow-up does not inject the previous relationship precious", async () => {
+  precious("partner-a", "Claude 的陪伴让我觉得被接住，这是一段很长的关系记忆。");
+  precious("partner-a", "喜欢 Cloudflare");
+  const { response } = await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [
+      { role: "user", content: "聊聊 Claude 的陪伴" },
+      { role: "assistant", content: "好" },
+      { role: "user", content: "调试暗号是什么？" }
+    ]
+  });
+  assert.equal(response.headers.get("x-aelios-memory"), "empty");
+  assert.doesNotMatch(JSON.stringify(calls[0].query.messages), /陪伴|关系记忆|喜欢 Cloudflare/);
+});
+
+test("please-remember writes the original words into long-term memory", async () => {
+  await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [{ role: "user", content: "请记住调试暗号是芝麻开门" }]
+  });
+  await persistExchange(env, queue[0]);
+  const row = sqlite.prepare("SELECT content, source, source_message_ids FROM memories").get() as {
+    content: string;
+    source: string;
+    source_message_ids: string;
+  };
+  assert.equal(row.content, "调试暗号是芝麻开门");
+  assert.equal(row.source, "remember_now");
+  assert.match(row.source_message_ids, /gw_user_/);
+});
+
+test("upstream forwards the panel Gateway ID", async () => {
+  env.AI_GATEWAY_ID = "panel-gateway";
+  await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(calls[0].headers["cf-aig-gateway-id"], "panel-gateway");
+});
+
 test("settings edited in the admin page override deployment vars everywhere", async () => {
   const withSettings = { ...config(), settings: { CHAT_MODEL: "chosen-in-admin", MEMORY_FILTER_MAX_OUTPUT: " 5 ", DREAM_TIME_ZONE: "" } };
   assert.equal((await worker.fetch(request("/api/gateway/config", withSettings, {}, "PUT"), env, ctx)).status, 200);

@@ -29,6 +29,7 @@ import {
 import { handleMcp } from "./api/mcp";
 import { handleModels } from "./api/models";
 import { handleRelationsGraph } from "./api/relations";
+import { runCandidateJudge } from "./memory/candidateJudge";
 import { runDailyMemoryDigest, runDreamBackfill } from "./memory/dailyDigest";
 import {
   runDiaryTrigger,
@@ -258,6 +259,16 @@ export default {
 
             const dreamResults = await runDailyMemoryDigestBatches(env, namespace);
             results.push({ type: "dream_batches", results: dreamResults });
+
+            try {
+              results.push({ type: "candidate_judge", result: await runCandidateJudge(env, namespace) });
+            } catch (error) {
+              console.error("scheduled candidate judge failed", {
+                namespace,
+                error: error instanceof Error ? error.message : String(error)
+              });
+              results.push({ type: "candidate_judge", result: { ran: false, error: String(error) } });
+            }
 
             // Rollup phase triggers (diary → github∥retention → weekly → monthly). Order preserved.
             let diaryWriter: Awaited<ReturnType<typeof runDiaryTrigger>> | undefined;

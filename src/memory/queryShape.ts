@@ -68,7 +68,10 @@ export function shapeRecallQuery(input: { query: string; recent?: string[] }): S
   const thin = isThinQuery(original);
   const context = recent.join("\n");
   const embeddingQuery = (thin && context ? `${context}\n${original}` : original).slice(-800);
-  const lexicalTokens = tokenizeQuery([original, ...recent.slice(-2)].join("\n"));
+  // Topical questions keep their own tokens. Mixing the last two turns here
+  // was leaking the previous topic into precious / week / glossary selection.
+  const lexicalSource = thin ? [original, ...recent.slice(-2)].join("\n") : original;
+  const lexicalTokens = tokenizeQuery(lexicalSource);
   return { original, embeddingQuery, lexicalTokens, thin };
 }
 
@@ -82,16 +85,35 @@ export function lexicalOverlapScore(text: string, tokens: string[]): number {
   return hits / tokens.length;
 }
 
+export function overlappingTokens(text: string, tokens: string[]): string[] {
+  const lower = text.toLowerCase();
+  return tokens.filter((token) => token && lower.includes(token.toLowerCase()));
+}
+
+export function isDistinctiveToken(token: string): boolean {
+  if (!token) return false;
+  if (token.length >= 4) return true;
+  if (token.length >= 3 && /^[a-z0-9]+$/i.test(token)) return true;
+  return token.length >= 2 && /[\u4e00-\u9fff]/.test(token);
+}
+
+export function isPreciousRelevant(text: string, tokens: string[]): boolean {
+  const hits = overlappingTokens(text, tokens);
+  if (hits.length >= 2) return true;
+  return hits.some(isDistinctiveToken);
+}
+
 export function selectRelevantPrecious<T extends { content: string }>(
   rows: T[],
   tokens: string[],
   options?: { limit?: number }
 ): T[] {
   const limit = options?.limit ?? 5;
+  if (tokens.length === 0 || limit <= 0) return [];
   return rows
-    .map((row) => ({ row, score: lexicalOverlapScore(row.content, tokens) }))
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score || a.row.content.localeCompare(b.row.content))
+    .map((row) => ({ row, score: lexicalOverlapScore(row.content, tokens), hits: overlappingTokens(row.content, tokens) }))
+    .filter((item) => item.score > 0 && isPreciousRelevant(item.row.content, tokens))
+    .sort((a, b) => b.score - a.score || b.hits.length - a.hits.length || a.row.content.localeCompare(b.row.content))
     .slice(0, limit)
     .map((item) => item.row);
 }

@@ -52,13 +52,17 @@ function getMaxCandidates(env: Env): number {
 }
 
 function getMaxOutput(env: Env): number {
-  const value = Number(env.MEMORY_FILTER_MAX_OUTPUT || 3);
-  return Number.isFinite(value) ? clamp(Math.floor(value), 1, 20) : 3;
+  const value = Number(env.MEMORY_FILTER_MAX_OUTPUT ?? 3);
+  return Number.isFinite(value) ? clamp(Math.floor(value), 0, 20) : 3;
 }
 
 function getMaxContentChars(env: Env): number {
   const value = Number(env.MEMORY_FILTER_MAX_CONTENT_CHARS || 700);
   return Number.isFinite(value) ? clamp(Math.floor(value), 120, 3000) : 700;
+}
+
+export function recallInjectionBudget(env: Env): { maxItems: number; maxChars: number } {
+  return { maxItems: getMaxOutput(env), maxChars: getMaxContentChars(env) };
 }
 
 function getFilterMinScore(env: Env): number {
@@ -77,33 +81,23 @@ function normalizeForDedupe(text: string): string {
     .replace(/[，,。.!！?？；;：:“”"'`、\[\]【】（）()<>《》]/g, "");
 }
 
-function compareMemoryQuality(a: MemoryApiRecord, b: MemoryApiRecord): number {
-  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-
-  const scoreA = typeof a.score === "number" ? a.score : -1;
-  const scoreB = typeof b.score === "number" ? b.score : -1;
-  if (scoreA !== scoreB) return scoreB - scoreA;
-
-  if (a.importance !== b.importance) return b.importance - a.importance;
-  return b.confidence - a.confidence;
-}
-
 function prepareCandidates(env: Env, memories: MemoryApiRecord[]): MemoryApiRecord[] {
   const minScore = getFilterMinScore(env);
-  const sorted = memories
-    .flatMap((memory): MemoryApiRecord[] => {
-      const content = sanitizeSummaryContent(memory.content);
-      if (!content) return [];
-      if (!memory.pinned && typeof memory.score === "number" && memory.score < minScore) return [];
-      return [{ ...memory, content }];
-    })
-    .sort(compareMemoryQuality);
+  const eligible = memories.flatMap((memory): MemoryApiRecord[] => {
+    const content = sanitizeSummaryContent(memory.content);
+    if (!content) return [];
+    if (!memory.pinned && typeof memory.score === "number" && memory.score < minScore) return [];
+    return [{ ...memory, content }];
+  });
+  // Keep incoming hybrid/RRF order. Channel scores are not comparable, so do
+  // not re-sort by score here. Pinned notes still go first.
+  const ordered = [...eligible.filter((memory) => memory.pinned), ...eligible.filter((memory) => !memory.pinned)];
 
   const seenIds = new Set<string>();
   const seenContent = new Set<string>();
   const result: MemoryApiRecord[] = [];
 
-  for (const memory of sorted) {
+  for (const memory of ordered) {
     const normalized = normalizeForDedupe(memory.content);
     if (!normalized || seenIds.has(memory.id) || seenContent.has(normalized)) continue;
     seenIds.add(memory.id);
@@ -180,7 +174,7 @@ async function rerankMemories(
     const rows = readRerankerResponse(output);
     if (!rows) {
       return {
-        data: input.memories.slice(0, input.topK),
+        data: [],
         status: "error",
         model,
         reason: "invalid_reranker_output"
@@ -199,7 +193,7 @@ async function rerankMemories(
     }
 
     return {
-      data: reranked.length > 0 ? reranked : input.memories.slice(0, input.topK),
+      data: reranked,
       status: reranked.length > 0 ? "success" : "error",
       model,
       ...(reranked.length > 0 ? {} : { reason: "empty_reranker_output" })
@@ -207,7 +201,7 @@ async function rerankMemories(
   } catch (error) {
     console.error("memory reranker failed", error);
     return {
-      data: input.memories.slice(0, input.topK),
+      data: [],
       status: "error",
       model,
       reason: error instanceof Error && error.message ? error.message : "reranker_error"
@@ -261,6 +255,18 @@ export async function filterAndCompressMemoriesWithMeta(
   }
 
   const maxOutput = getMaxOutput(env);
+  if (maxOutput === 0) {
+    return {
+      data: [],
+      meta: {
+        ...baseMeta,
+        status: "empty",
+        candidate_count: 0,
+        output_count: 0,
+        reason: "max_output_zero"
+      }
+    };
+  }
   const candidates = prepareCandidates(env, input.memories);
   if (candidates.length === 0) {
     return {
@@ -289,18 +295,30 @@ export async function filterAndCompressMemoriesWithMeta(
       topK: maxOutput,
       maxContentChars: getMaxContentChars(env)
     });
+    if (reranked.status === "error") {
+      const errorMeta: MemoryFilterMeta = {
+        ...activeMeta,
+        status: "error",
+        reason: reranked.reason ?? "reranker_error",
+        reranker_status: reranked.status,
+        reranker_model: reranked.model,
+        reranker_count: reranked.data.length,
+        ...(reranked.reason ? { reranker_reason: reranked.reason } : {})
+      };
+      if (failOpen) return buildFailOpenResult({ ...reranked, data: candidates }, maxOutput, errorMeta);
+      return { data: [], meta: errorMeta };
+    }
     const filtered = reranked.data.slice(0, maxOutput);
     if (filtered.length === 0) {
       const errorMeta: MemoryFilterMeta = {
         ...activeMeta,
-        status: "error",
+        status: "empty",
         reason: reranked.reason ?? "empty_reranker_output",
         reranker_status: reranked.status,
         reranker_model: reranked.model,
         reranker_count: reranked.data.length,
         ...(reranked.reason ? { reranker_reason: reranked.reason } : {})
       };
-      if (failOpen) return buildFailOpenResult(reranked, maxOutput, errorMeta);
       return { data: [], meta: errorMeta };
     }
 

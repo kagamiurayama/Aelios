@@ -1,9 +1,10 @@
 import { authenticate } from "../auth/apiKey";
-import { runRecall, buildCoreFingerprint } from "../memory/v2/recall";
-import { listPrecious } from "../db/v2";
-import { selectRelevantPrecious, shapeRecallQuery } from "../memory/queryShape";
+import { markMemoriesInjected, listPrecious } from "../db/v2";
+import { recallInjectionBudget } from "../memory/filter";
 import { IMPRESSION_DISCLAIMER } from "../memory/impression";
-import { formatRecallSurface } from "../memory/surface";
+import { isPreciousRelevant, selectRelevantPrecious, shapeRecallQuery } from "../memory/queryShape";
+import { assembleRecallSurface } from "../memory/surface";
+import { buildCoreFingerprint, runRecall } from "../memory/v2/recall";
 import type { Env } from "../types";
 import { findIdentity, identityNamespace, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
 import { appendMemory, classifyTurn, hasServerState, recentHumanTexts, validateBody, type Body } from "./protocol";
@@ -23,22 +24,58 @@ export async function recallPatch(
 ): Promise<string> {
   const namespace = identityNamespace(identity);
   const shaped = shapeRecallQuery({ query, recent });
-  const precious = await listPrecious(env.DB, { namespace, limit: 20 });
+  const budget = recallInjectionBudget(env);
+  if (budget.maxItems === 0) {
+    console.log("gateway recall decision", { identity: identity.slug, injected: 0, reason: "budget_zero" });
+    return "";
+  }
+
+  const precious = await listPrecious(env.DB, { namespace, limit: 80 });
   const relevantPrecious = selectRelevantPrecious(precious, shaped.lexicalTokens);
   const recall = await runRecall(env, {
     namespace,
     query,
     recent,
     k: 12,
-    core_fingerprint: buildCoreFingerprint(precious.map(p => p.content)),
+    core_fingerprint: buildCoreFingerprint(relevantPrecious.map(p => p.content)),
+    skip_inject_mark: true,
     waitUntil: promise => ctx.waitUntil(promise.catch(() => console.error("gateway recall accounting failed")))
   });
-  return formatRecallSurface([
-    ...relevantPrecious.map(p => ({ kind: "precious", content: p.content })),
+  const weekBlocks = recall.week_blocks.filter((block) =>
+    isPreciousRelevant(`${block.week} ${block.title} ${block.summary}`, shaped.lexicalTokens)
+  );
+  const assembled = assembleRecallSurface([
+    ...relevantPrecious.map(p => ({ kind: "precious", content: p.content, id: p.id })),
     ...recall.glossary_hits.map(p => ({ kind: "glossary", content: `${p.term}: ${p.definition}` })),
-    ...recall.hits.map(p => ({ kind: p.type, content: p.content })),
-    ...recall.week_blocks.map(p => ({ kind: "week", content: `${IMPRESSION_DISCLAIMER} ${p.week}: ${p.summary}` }))
-  ], identity.maxMemoryChars || 6000);
+    ...recall.hits.map(p => ({ kind: p.type, content: p.content, id: p.id })),
+    ...weekBlocks.map(p => ({ kind: "week", content: `${IMPRESSION_DISCLAIMER} ${p.week}: ${p.summary}` }))
+  ], {
+    budget: identity.maxMemoryChars || 6000,
+    maxItems: budget.maxItems,
+    maxChars: budget.maxChars
+  });
+
+  const injectedMemoryIds = assembled.entries
+    .filter((entry) => entry.id && entry.kind !== "precious" && entry.kind !== "glossary" && entry.kind !== "week")
+    .map((entry) => entry.id!);
+  if (injectedMemoryIds.length > 0) {
+    ctx.waitUntil(
+      markMemoriesInjected(env.DB, { namespace, ids: injectedMemoryIds })
+        .catch(() => console.error("gateway recall accounting failed"))
+    );
+  }
+
+  console.log("gateway recall decision", {
+    identity: identity.slug,
+    query: query.slice(0, 80),
+    thin: shaped.thin,
+    precious_selected: relevantPrecious.length,
+    regular_hits: recall.hits.length,
+    week_blocks: weekBlocks.length,
+    injected: assembled.entries.length,
+    kinds: assembled.entries.map((entry) => entry.kind)
+  });
+  return assembled.text;
 }
 export async function handleGateway(request: Request, env: Env, ctx: ExecutionContext,
   protocol: Protocol, slug: string | null = null): Promise<Response> {

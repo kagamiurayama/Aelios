@@ -97,7 +97,7 @@ export async function listActiveFactKeys(
 // 调用方 (dream/judge 每条独立 try/catch) 记失败跳过，亲笔原文保住。
 // =====================================================================
 
-const HAND_AUTHOR_SOURCES = new Set(["mcp", "manual", "api"]);
+const HAND_AUTHOR_SOURCES = new Set(["mcp", "manual", "api", "remember_now"]);
 
 export function isHandAuthorSource(source: string | null | undefined): boolean {
   return typeof source === "string" && HAND_AUTHOR_SOURCES.has(source);

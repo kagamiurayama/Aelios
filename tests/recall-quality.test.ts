@@ -9,9 +9,24 @@ import {
   shapeRecallQuery,
   tokenizeQuery
 } from "../src/memory/queryShape";
-import { formatRecallSurface } from "../src/memory/surface";
+import { assembleRecallSurface, formatRecallSurface } from "../src/memory/surface";
+import { filterAndCompressMemoriesWithMeta } from "../src/memory/filter";
+import { formatDreamCursor, readDailyCursor } from "../src/memory/dreamDates";
+import { listMessagesByNamespaceInRange } from "../src/db/messages";
+import { parseRememberNow } from "../src/memory/rememberNow";
 import { searchMemoriesByText } from "../src/db/memories";
 import { recentHumanTexts } from "../src/gateway/protocol";
+
+test("topical questions do not mix the previous turn into lexical tokens", () => {
+  const shaped = shapeRecallQuery({
+    query: "调试暗号是什么？",
+    recent: ["Claude 的陪伴让我觉得被接住"]
+  });
+  assert.equal(shaped.thin, false);
+  assert.equal(shaped.embeddingQuery, "调试暗号是什么？");
+  assert.ok(!shaped.lexicalTokens.some((token) => /claude|陪伴/.test(token)));
+  assert.ok(shaped.lexicalTokens.some((token) => token.includes("暗号") || token.includes("调试")));
+});
 
 test("thin continuations expand with recent turns; topical questions stay as-is", () => {
   assert.equal(isThinQuery("那个呢？"), true);
@@ -120,6 +135,116 @@ test("token lexical search matches a phrase the full query would miss", async ()
   assert.ok(hits.some((row) => row.id === "mem_cf"));
   assert.ok(!hits.some((row) => row.id === "mem_food"));
   sqlite.close();
+});
+
+test("precious selection allows zero hits and ignores a leftover previous-topic note", () => {
+  const rows = [
+    { content: "Claude 的陪伴让我觉得被接住，这是一段很长的关系记忆。" },
+    { content: "调试暗号是芝麻开门" }
+  ];
+  const tokens = shapeRecallQuery({
+    query: "调试暗号是什么？",
+    recent: ["Claude 的陪伴让我觉得被接住"]
+  }).lexicalTokens;
+  const selected = selectRelevantPrecious(rows, tokens);
+  assert.ok(selected.some((row) => row.content.includes("芝麻开门")));
+  assert.ok(!selected.some((row) => row.content.includes("陪伴")));
+  assert.deepEqual(selectRelevantPrecious(rows, []), []);
+});
+
+test("surface applies a shared item and char budget", () => {
+  const assembled = assembleRecallSurface([
+    { kind: "precious", content: "很长的关系记忆".repeat(20) },
+    { kind: "note", content: "普通记忆一" },
+    { kind: "week", content: "不该超过条数的周记" }
+  ], { budget: 6000, maxItems: 2, maxChars: 20 });
+  assert.equal(assembled.entries.length, 2);
+  assert.ok(assembled.entries[0].content.length <= 20);
+  assert.ok(!assembled.text.includes("不该超过条数的周记"));
+  assert.equal(formatRecallSurface([], { maxItems: 0 }), "");
+});
+
+test("reranker errors fail closed unless MEMORY_FILTER_FAIL_OPEN is true", async () => {
+  const memories = [
+    { id: "noise", namespace: "n", type: "note", content: "完全无关的旧话题", summary: null, importance: 0.2, confidence: 0.2, status: "active", pinned: false, tags: [], source: null, source_message_ids: [], vector_id: null, last_recalled_at: null, recall_count: 0, created_at: "2026-09-01", updated_at: "2026-09-01", expires_at: null, score: 0.9 }
+  ];
+  const env = {
+    ENABLE_MEMORY_FILTER: "true",
+    ENABLE_MEMORY_RERANKER: "true",
+    MEMORY_FILTER_FAIL_OPEN: "false",
+    MEMORY_RERANKER_MODEL: "workers-ai/@cf/baai/bge-reranker-base",
+    AI: { run: async () => { throw new Error("reranker down"); } }
+  } as any;
+  const closed = await filterAndCompressMemoriesWithMeta(env, { query: "调试暗号", memories: memories as any });
+  assert.equal(closed.data.length, 0);
+  assert.equal(closed.meta.status, "error");
+  assert.equal(closed.meta.fallback_used, undefined);
+
+  const opened = await filterAndCompressMemoriesWithMeta({
+    ...env,
+    MEMORY_FILTER_FAIL_OPEN: "true"
+  }, { query: "调试暗号", memories: memories as any });
+  assert.equal(opened.data.length, 1);
+  assert.equal(opened.meta.fallback_used, true);
+});
+
+test("same-timestamp messages are not skipped after a mid-batch cut", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
+    source TEXT, created_at TEXT
+  )`);
+  const ts = "2026-09-06T12:00:00.000Z";
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)").run("msg_a", "c", "ns", "user", "先说", "gw", ts);
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)").run("msg_b", "c", "ns", "assistant", "后说", "gw", ts);
+  const db = {
+    prepare(sql: string) {
+      const statement = sqlite.prepare(sql);
+      let args: unknown[] = [];
+      const api = {
+        bind(...values: unknown[]) { args = values; return api; },
+        async all() { return { results: statement.all(...args) }; }
+      };
+      return api;
+    }
+  };
+  const first = await listMessagesByNamespaceInRange(db as any, {
+    namespace: "ns",
+    startCreatedAt: "2026-09-06T00:00:00.000Z",
+    endCreatedAt: "2026-09-07T00:00:00.000Z",
+    limit: 1
+  });
+  assert.equal(first[0].id, "msg_a");
+  const skipped = await listMessagesByNamespaceInRange(db as any, {
+    namespace: "ns",
+    startCreatedAt: "2026-09-06T00:00:00.000Z",
+    endCreatedAt: "2026-09-07T00:00:00.000Z",
+    afterCreatedAt: first[0].created_at,
+    limit: 10
+  });
+  assert.equal(skipped.length, 0);
+  const next = await listMessagesByNamespaceInRange(db as any, {
+    namespace: "ns",
+    startCreatedAt: "2026-09-06T00:00:00.000Z",
+    endCreatedAt: "2026-09-07T00:00:00.000Z",
+    afterCreatedAt: first[0].created_at,
+    afterId: first[0].id,
+    limit: 10
+  });
+  assert.equal(next[0].id, "msg_b");
+  const cursor = formatDreamCursor({ done: false, createdAt: first[0].created_at, id: first[0].id });
+  assert.deepEqual(
+    readDailyCursor(cursor, "2026-09-06T00:00:00.000Z", "2026-09-07T00:00:00.000Z"),
+    { done: false, after: ts, afterId: "msg_a" }
+  );
+  sqlite.close();
+});
+
+test("remember-now extracts the original words after the trigger", () => {
+  assert.equal(parseRememberNow("请记住调试暗号是芝麻开门"), "调试暗号是芝麻开门");
+  assert.equal(parseRememberNow("帮我记一下：喜欢 Cloudflare"), "喜欢 Cloudflare");
+  assert.equal(parseRememberNow("remember that the passphrase is sesame"), "the passphrase is sesame");
+  assert.equal(parseRememberNow("我们喜欢什么？"), null);
 });
 
 test("recentHumanTexts walks user turns in chronological order", () => {

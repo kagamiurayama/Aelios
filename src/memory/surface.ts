@@ -4,13 +4,38 @@
 export interface SurfaceEntry {
   kind: string;
   content: string;
+  id?: string;
 }
 
-export function formatRecallSurface(entries: SurfaceEntry[], budget = 6000): string {
+export interface SurfaceOptions {
+  budget?: number;
+  maxItems?: number;
+  maxChars?: number;
+}
+
+export interface AssembledSurface {
+  text: string;
+  entries: SurfaceEntry[];
+}
+
+function truncateEntry(text: string, maxChars: number): string {
+  if (!Number.isFinite(maxChars) || text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(maxChars - 1, 8)).trim()}…`;
+}
+
+export function assembleRecallSurface(entries: SurfaceEntry[], options: SurfaceOptions = {}): AssembledSurface {
+  const budget = options.budget ?? 6000;
+  const maxItems = options.maxItems ?? entries.length;
+  const maxChars = options.maxChars ?? Number.POSITIVE_INFINITY;
   const cleaned = entries
-    .map((entry) => ({ kind: entry.kind.trim(), content: entry.content.trim() }))
-    .filter((entry) => entry.kind && entry.content);
-  if (cleaned.length === 0) return "";
+    .map((entry) => ({
+      kind: entry.kind.trim(),
+      content: truncateEntry(entry.content.trim(), maxChars),
+      ...(entry.id ? { id: entry.id } : {})
+    }))
+    .filter((entry) => entry.kind && entry.content)
+    .slice(0, Math.max(maxItems, 0));
+  if (cleaned.length === 0) return { text: "", entries: [] };
 
   const header = [
     "[Aelios memory reference — this request only]",
@@ -21,18 +46,25 @@ export function formatRecallSurface(entries: SurfaceEntry[], budget = 6000): str
   const overhead = header.length + footer.length;
 
   const lines: string[] = [];
-  let used = 0;
+  const used: SurfaceEntry[] = [];
+  let usedChars = 0;
   for (const entry of cleaned) {
-    const remaining = budget - overhead - used;
+    const remaining = budget - overhead - usedChars;
     if (remaining <= 24) break;
     const content = entry.content.length + 16 > remaining
       ? `${entry.content.slice(0, Math.max(remaining - 16, 8)).trim()}…`
       : entry.content;
     const line = `- [${entry.kind}] ${content}`;
     lines.push(line);
-    used += line.length + 1;
+    used.push({ ...entry, content });
+    usedChars += line.length + 1;
   }
 
-  if (lines.length === 0) return "";
-  return header + lines.join("\n") + footer;
+  if (lines.length === 0) return { text: "", entries: [] };
+  return { text: header + lines.join("\n") + footer, entries: used };
+}
+
+export function formatRecallSurface(entries: SurfaceEntry[], budgetOrOptions: number | SurfaceOptions = 6000): string {
+  const options = typeof budgetOrOptions === "number" ? { budget: budgetOrOptions } : budgetOrOptions;
+  return assembleRecallSurface(entries, options).text;
 }

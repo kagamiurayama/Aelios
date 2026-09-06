@@ -75,7 +75,7 @@ export interface Env {
   DEDUP_COSINE?: string;
   // L4 每区（type）active 条数硬上限，0 或不设 = 关闭（母帖第一节，对抗膨胀的闸）
   MEMORY_ZONE_CAP?: string;
-  // 候选队列自动评审（judge），默认关闭
+  // 候选队列自动评审（judge），默认开启；设 "false" 关闭
   CANDIDATE_JUDGE_ENABLED?: string;
   JUDGE_MODEL?: string;
   JUDGE_MAX_CANDIDATES?: string;

@@ -3,8 +3,8 @@ import type { Env } from "../types";
 // Everything here is editable from /admin/gateway, so Worker settings only needs the API key.
 export interface SettingSpec { name: string; label: string; hint?: string; group: string }
 export const SETTINGS: SettingSpec[] = [
-  { group: "记忆召回", name: "MEMORY_FILTER_MAX_OUTPUT", label: "每次注入几条记忆", hint: "追加到消息末尾的条数，多了占上下文" },
-  { group: "记忆召回", name: "MEMORY_FILTER_MAX_CONTENT_CHARS", label: "每条记忆最长字数" },
+  { group: "记忆召回", name: "MEMORY_FILTER_MAX_OUTPUT", label: "每次注入几条记忆", hint: "珍贵、术语、普通记忆和周记共用。0 表示本轮不注入" },
+  { group: "记忆召回", name: "MEMORY_FILTER_MAX_CONTENT_CHARS", label: "每条记忆最长字数", hint: "注入原文也会按这个长度截断" },
   { group: "记忆召回", name: "MEMORY_TOP_K", label: "先从向量库取多少条", hint: "取回来再交给重排模型挑" },
   { group: "记忆召回", name: "MEMORY_FILTER_MAX_CANDIDATES", label: "送进重排的条数" },
   { group: "记忆召回", name: "MEMORY_MIN_SCORE", label: "相似度下限", hint: "只当垃圾闸，精度靠重排。调高会漏掉换了说法的记忆" },
@@ -20,6 +20,7 @@ export const SETTINGS: SettingSpec[] = [
   { group: "Dream 与日记", name: "DREAM_MAX_TOKENS", label: "单轮输出上限" },
   { group: "Dream 与日记", name: "DEDUP_COSINE", label: "记忆去重相似度", hint: "越高越容易判成新记忆，越低越容易被合并" },
   { group: "Dream 与日记", name: "WEEKLY_ROLLUP_DELETE_DAILIES", label: "周记落成后自动删日志", hint: "填 false 走人工审阅，填 true 一条龙" },
+  { group: "Dream 与日记", name: "CANDIDATE_JUDGE_ENABLED", label: "Dream 之后自动审核候选", hint: "默认开启。填 false 才回到全部人工批准" },
 
   { group: "数据留存", name: "MESSAGES_RETENTION_DAYS", label: "原始对话保留天数", hint: "Dream 抽完记忆后，原文留几天" },
 

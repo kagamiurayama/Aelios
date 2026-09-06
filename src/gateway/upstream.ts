@@ -26,6 +26,8 @@ export async function callGatewayUpstream(env: Env, config: GatewayConfig, ident
     if (value) headers.set(name, value);
   }
   if (protocol === "messages" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
+  const gatewayId = env.AI_GATEWAY_ID?.trim();
+  if (gatewayId) headers.set("cf-aig-gateway-id", gatewayId);
   applyThinkingPolicy(body, identity, protocol, headers);
   return fetch(`${upstreamBaseUrl(env, config)}/${PATHS[protocol]}`, {
     method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"

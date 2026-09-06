@@ -328,6 +328,8 @@ export interface RecallInput {
   exclude_weeks?: string[];
   // When set (chat hot path), injection accounting is scheduled off the response path.
   waitUntil?: (promise: Promise<unknown>) => void;
+  // Gateway applies the unified surface budget first, then marks only those ids.
+  skip_inject_mark?: boolean;
 }
 
 export interface RecallHit {
@@ -403,7 +405,9 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   const minScore = readRecallMinScore(env, input.min_score);
 
   const shaped = shapeRecallQuery({ query, recent: input.recent });
-  const glossaryQuery = [query, ...(input.recent ?? [])].filter(Boolean).join("\n");
+  const glossaryQuery = shaped.thin
+    ? [query, ...(input.recent ?? [])].filter(Boolean).join("\n")
+    : query;
 
   // 1. 黑话词面命中 (L5，不进向量，走词面)
   const glossaryRows = await matchGlossary(env.DB, {
@@ -529,7 +533,7 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   const memoryIdsToMark = allHits
     .filter((h) => h.source_layer === "memory")
     .map((h) => h.id);
-  if (memoryIdsToMark.length > 0) {
+  if (memoryIdsToMark.length > 0 && !input.skip_inject_mark) {
     const markPromise = markMemoriesInjected(env.DB, {
       namespace: input.namespace,
       ids: memoryIdsToMark
