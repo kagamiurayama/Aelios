@@ -409,14 +409,17 @@ test("messages on CF strips the provider prefix and carries the token as cf-aig-
   assert.equal(calls[0].headers["anthropic-version"], "2023-06-01");
 });
 
-test("messages and responses on CF reject providers with no native endpoint, before any upstream call", async () => {
+test("any provider gets a native messages/responses route; prefixless models are refused before any upstream call", async () => {
   setConfig({ ...config(), upstream: { address: "d".repeat(32) } });
-  const messages = await run("/v1/messages", { model: "openai/gpt-5.1", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(messages.response.status, 400);
-  assert.match(messages.text, /chat\/completions/);
-  const responses = await run("/v1/responses", { model: "anthropic/claude-opus-5", input: "Hi" });
-  assert.equal(responses.response.status, 400);
-  assert.equal(calls.length, 0);
+  await run("/v1/messages", { model: "openrouter/anthropic/claude-haiku-4.5", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${"d".repeat(32)}/default/openrouter/v1/messages`);
+  assert.equal(calls[0].query.model, "anthropic/claude-haiku-4.5");
+  await run("/v1/responses", { model: "openrouter/openai/gpt-5.1", input: "Hi" });
+  assert.equal(calls[1].url, `https://gateway.ai.cloudflare.com/v1/${"d".repeat(32)}/default/openrouter/v1/responses`);
+  const bare = await run("/v1/messages", { model: "claude-opus-5", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(bare.response.status, 400);
+  assert.match(bare.text, /provider prefix/);
+  assert.equal(calls.length, 2);
 });
 
 test("settings edited in the admin page override deployment vars everywhere", async () => {

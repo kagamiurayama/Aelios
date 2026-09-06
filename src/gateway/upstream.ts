@@ -91,8 +91,9 @@ export interface UpstreamRoute {
 
 /**
  * BYOK lives on the gateway surface; CF REST spends Unified credits only.
- * chat → compat (every provider). messages → the anthropic provider endpoint,
- * responses → the openai one; other providers have no native endpoint there.
+ * chat → compat (every provider). messages / responses → the provider's native
+ * endpoint with its own path shape (`/v1/messages`; openai's responses drops the
+ * v1 per CF docs). Unsupported combinations fail honestly at the provider.
  */
 export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: string): UpstreamRoute {
   if (!resolved.accountId) return { url: `${resolved.base}/${PATHS[protocol]}`, model, auth: "bearer" };
@@ -101,14 +102,11 @@ export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: 
   const slash = model.indexOf("/");
   const provider = slash > 0 ? model.slice(0, slash).toLowerCase() : "";
   const native = slash > 0 ? model.slice(slash + 1) : model;
-  if (protocol === "messages") {
-    if (provider !== "anthropic") throw new UpstreamRouteError(
-      `Messages over BYOK only serves anthropic/* models; "${model}" needs chat/completions instead.`);
-    return { url: `${gw}/anthropic/v1/messages`, model: native, auth: "cf-aig" };
-  }
-  if (provider !== "openai") throw new UpstreamRouteError(
-    `Responses over BYOK only serves openai/* models; "${model}" needs chat/completions instead.`);
-  return { url: `${gw}/openai/responses`, model: native, auth: "cf-aig" };
+  if (!provider) throw new UpstreamRouteError(
+    `"${model}" has no provider prefix; use the author/model form so the BYOK endpoint is known.`);
+  const path = protocol === "messages" ? `/v1/messages`
+    : provider === "openai" ? `/responses` : `/v1/responses`;
+  return { url: `${gw}/${provider}${path}`, model: native, auth: "cf-aig" };
 }
 
 // One call, one upstream. Model names pass through as written (minus the provider
