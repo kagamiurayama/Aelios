@@ -12,7 +12,7 @@ import { nowIso } from "../utils/time";
 import { findIdentity, identityNamespace, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
 import { appendMemory, classifyTurn, hasServerState, recentHumanTexts, validateBody, type Body } from "./protocol";
 import { dispatchExchange, persistHumanUtterance, observeResponse, prepareExchange } from "./record";
-import { callGatewayUpstream } from "./upstream";
+import { callGatewayUpstream, UpstreamRouteError } from "./upstream";
 
 export function gatewayError(protocol: Protocol, message: string, status: number): Response {
   const type = status === 401 ? "authentication_error" : status >= 500 ? "api_error" : "invalid_request_error";
@@ -213,6 +213,7 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       exchange.httpStatus = 502;
       ctx.waitUntil(dispatchExchange(env, exchange).catch(() => console.error("gateway exchange recording failed")));
     }
-    return gatewayError(protocol, `Upstream request failed: ${error instanceof Error ? error.message : String(error)}`, 502);
+    return gatewayError(protocol, `Upstream request failed: ${error instanceof Error ? error.message : String(error)}`,
+      error instanceof UpstreamRouteError ? error.status : 502);
   }
 }

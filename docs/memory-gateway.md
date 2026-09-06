@@ -1,14 +1,14 @@
 # Aelios 记忆网关（开发分支）
 
 Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工具循环。
-上游只有一个：Cloudflare REST API（AI Gateway），一把 CF token 管所有，无需 BYOK、无需 LiteLLM。
+上游只有一个:Cloudflare AI Gateway(BYOK 走 gateway 面,REST 只花 Unified 额度),一把 CF token 管所有,无需 LiteLLM。
 
 ## 分工
 
 | 组件 | 工作 |
 | --- | --- |
 | Worker | 原生协议入口、身份解析、主模型记忆追加、流式字节透传 |
-| CF REST / AI Gateway | Provider 识别（`author/model`）、计费（Unified Billing）、限流、日志 |
+| CF AI Gateway | Provider 识别(`author/model`)、BYOK 计费、限流、日志 |
 | CF Dynamic Routes | 预算、路由与 fallback（在 CF 侧配置，本网关不实现） |
 | Workers AI | embedding、reranker、默认 Dream 模型 |
 | Vectorize | 按 namespace 检索长期记忆 |
@@ -36,6 +36,8 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 配置优先级：D1 保存的配置 > Worker `GATEWAY_CONFIG` JSON 变量 > 空配置。
 空配置的模型列表为空，聊天请求返回配置提示。
 `GET /v1/models` 透传上游模型目录：CF 账号走 AI Gateway 的 compat 目录（`gateway.ai.cloudflare.com/v1/{账号}/{网关}/compat/models`，REST 无 GET /models），自定义地址走 `{base}/models`；上游答不上或无 CF token 时回落为主模型白名单提示。
+
+聊天协议路由(仅 CF 上游;自定义地址原样透传):chat 走 `…/{网关}/compat/chat/completions`(全 provider,BYOK);messages 只对 `anthropic/*` 开放,走 `…/{网关}/anthropic/v1/messages`,模型名剥掉 `anthropic/` 前缀,CF token 以 `cf-aig-authorization` 头携带;responses 只对 `openai/*` 开放,走 `…/{网关}/openai/responses`。其余 provider + 协议组合在网关内直接 400,不打上游。
 管理配置允许 `CHATBOX_API_KEY` / `DEBUG_API_KEY`。旧 MCP 与记忆管理权限不变。
 
 ## 首次配置

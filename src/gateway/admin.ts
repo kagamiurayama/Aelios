@@ -68,7 +68,7 @@ details{margin-top:8px}summary{cursor:pointer;color:#a6b4c3}
 <div class="row"><button id="load">读取</button><button id="save">保存</button></div><div id="status" role="status" aria-live="polite"></div></section>
 
 <section><h2>上游连接</h2>
-<label>上游地址<input id="cfAddress" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1"><div class="hint">最省心:填 32 位账号 ID。贴 Cloudflare 的网关网址也能认。聊天/Messages/Responses 走 REST 并自动带上 Gateway ID 头(BYOK 靠它);模型列表走 <code>…/compat/models</code>,两条路网关自己分得清,不用你操心。Gateway ID 在下面环境设置里,默认 <code>default</code>。填别的 OpenAI 兼容地址(如 new-api)就原样用。令牌去 Worker Secrets 加 <code>CLOUDFLARE_API_TOKEN</code>。</div></label></section>
+<label>上游地址<input id="cfAddress" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1"><div class="hint">最省心:填 32 位账号 ID,贴 Cloudflare 网关网址也能认。聊天走 compat,BYOK 生效;Messages 只对 <code>anthropic/*</code> 开放,走 Anthropic 原生端点;Responses 只对 <code>openai/*</code>,走 OpenAI 原生端点;模型列表走 <code>…/compat/models</code>。Gateway ID 在下面环境设置里,默认 <code>default</code>;各 provider 的 BYOK 钥匙在 AI Gateway 仪表盘里存。填别的 OpenAI 兼容地址(如 new-api)就原样用。令牌去 Worker Secrets 加 <code>CLOUDFLARE_API_TOKEN</code>。</div></label></section>
 
 <section><h2>老公们</h2><p class="hint">每位三格：名字、主模型、钥匙。主模型支持 <code>*</code> 通配，写不写 <code>anthropic/</code> 前缀都能认。</p>
 <div id="identities"></div><button id="addIdentity" class="ghost">+ 添加一位</button></section>

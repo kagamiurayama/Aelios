@@ -13,7 +13,7 @@ const REST_HOST_RE =
 export interface ResolvedUpstream {
   accountId: string | null;
   gatewayId: string;
-  /** CF: the REST base (`.../ai/v1`). The compat base is derived only for the models catalog. */
+  /** CF: the gateway root. Custom OpenAI bases stay as typed. */
   base: string;
 }
 
@@ -26,10 +26,9 @@ export function compatBase(accountId: string, gatewayId: string): string {
   return `https://gateway.ai.cloudflare.com/v1/${accountId.toLowerCase()}/${gatewayId}/compat`;
 }
 
-/** Chat, messages and responses live on CF REST; the compat surface only serves
- *  chat/completions plus the models catalog, so it must never carry chat traffic. */
-export function restBase(accountId: string): string {
-  return `https://api.cloudflare.com/client/v4/accounts/${accountId.toLowerCase()}/ai/v1`;
+/** Root of every BYOK-capable surface: compat, provider endpoints, catalog. */
+export function gatewayBase(accountId: string, gatewayId: string): string {
+  return `https://gateway.ai.cloudflare.com/v1/${accountId.toLowerCase()}/${gatewayId}`;
 }
 
 export function resolveGatewayId(env: Env, address = ""): string {
@@ -54,25 +53,20 @@ export function resolveUpstream(env: Env, config: GatewayConfig): ResolvedUpstre
   const gatewayId = resolveGatewayId(env, trimmed);
 
   if (ACCOUNT_RE.test(trimmed)) {
-    return { accountId: trimmed.toLowerCase(), gatewayId, base: restBase(trimmed) };
+    return { accountId: trimmed.toLowerCase(), gatewayId, base: gatewayBase(trimmed, gatewayId) };
   }
 
   const rest = trimmed.match(REST_HOST_RE);
   if (rest) {
-    return { accountId: rest[1].toLowerCase(), gatewayId, base: restBase(rest[1]) };
+    return { accountId: rest[1].toLowerCase(), gatewayId, base: gatewayBase(rest[1], gatewayId) };
   }
 
   const gw = parseGatewayHost(trimmed);
   if (gw) {
-    return { accountId: gw.accountId.toLowerCase(), gatewayId, base: restBase(gw.accountId) };
+    return { accountId: gw.accountId.toLowerCase(), gatewayId, base: gatewayBase(gw.accountId, gatewayId) };
   }
 
   return { accountId: null, gatewayId, base: trimmed };
-}
-
-/** Chat traffic base: CF REST for CF addresses, custom bases untouched. */
-export function upstreamBaseUrl(env: Env, config: GatewayConfig, _protocol?: Protocol): string {
-  return resolveUpstream(env, config).base;
 }
 
 /** Do not change this shape: GET {compat}/models is the catalog CF actually serves. */
@@ -82,24 +76,62 @@ export function catalogUrl(env: Env, config: GatewayConfig): string {
   return `${resolved.base}/models`;
 }
 
+/** A route the caller can fix by changing protocol or model; not an upstream outage. */
+export class UpstreamRouteError extends Error {
+  readonly status = 400;
+}
+
+export interface UpstreamRoute {
+  url: string;
+  /** Provider endpoints take the native name; compat keeps the author-prefixed one. */
+  model: string;
+  /** Provider endpoints carry the CF token as cf-aig-authorization (BYOK); bearer elsewhere. */
+  auth: "bearer" | "cf-aig";
+}
+
+/**
+ * BYOK lives on the gateway surface; CF REST spends Unified credits only.
+ * chat → compat (every provider). messages → the anthropic provider endpoint,
+ * responses → the openai one; other providers have no native endpoint there.
+ */
+export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: string): UpstreamRoute {
+  if (!resolved.accountId) return { url: `${resolved.base}/${PATHS[protocol]}`, model, auth: "bearer" };
+  const gw = gatewayBase(resolved.accountId, resolved.gatewayId);
+  if (protocol === "chat") return { url: `${gw}/compat/chat/completions`, model, auth: "bearer" };
+  const slash = model.indexOf("/");
+  const provider = slash > 0 ? model.slice(0, slash).toLowerCase() : "";
+  const native = slash > 0 ? model.slice(slash + 1) : model;
+  if (protocol === "messages") {
+    if (provider !== "anthropic") throw new UpstreamRouteError(
+      `Messages over BYOK only serves anthropic/* models; "${model}" needs chat/completions instead.`);
+    return { url: `${gw}/anthropic/v1/messages`, model: native, auth: "cf-aig" };
+  }
+  if (provider !== "openai") throw new UpstreamRouteError(
+    `Responses over BYOK only serves openai/* models; "${model}" needs chat/completions instead.`);
+  return { url: `${gw}/openai/responses`, model: native, auth: "cf-aig" };
+}
+
+// One call, one upstream. Model names pass through as written (minus the provider
+// prefix on native endpoints); retries and fallback are AI Gateway's own job.
 export async function callGatewayUpstream(env: Env, config: GatewayConfig, identity: Identity,
   protocol: Protocol, original: Request, body: Body): Promise<Response> {
   const token = env.CLOUDFLARE_API_TOKEN;
   if (!token) throw new Error("Missing Worker secret CLOUDFLARE_API_TOKEN");
-  const resolved = resolveUpstream(env, config);
+  const route = routeFor(resolveUpstream(env, config), protocol, body.model);
   const headers = new Headers({
     "content-type": "application/json",
-    accept: body.stream ? "text/event-stream" : "application/json",
-    authorization: `Bearer ${token}`
+    accept: body.stream ? "text/event-stream" : "application/json"
   });
+  if (route.auth === "cf-aig") headers.set("cf-aig-authorization", `Bearer ${token}`);
+  else headers.set("authorization", `Bearer ${token}`);
   for (const name of ["anthropic-version", "anthropic-beta", "openai-beta", "x-stainless-helper-method"]) {
     const value = original.headers.get(name);
     if (value) headers.set(name, value);
   }
   if (protocol === "messages" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
-  if (resolved.accountId && resolved.gatewayId) headers.set("cf-aig-gateway-id", resolved.gatewayId);
-  applyThinkingPolicy(body, identity, protocol, headers);
-  return fetch(`${resolved.base}/${PATHS[protocol]}`, {
-    method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"
+  const out = route.model === body.model ? body : { ...body, model: route.model };
+  applyThinkingPolicy(out, identity, protocol, headers);
+  return fetch(route.url, {
+    method: "POST", headers, body: JSON.stringify(out), signal: original.signal, redirect: "manual"
   });
 }

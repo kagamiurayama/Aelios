@@ -6,7 +6,7 @@ import { timingSafeEqual } from "node:crypto";
 import worker from "../src/index";
 import { invalidateSettingsCache, validateConfig } from "../src/gateway/config";
 import { appendMemory, classifyTurn, canonical } from "../src/gateway/protocol";
-import { catalogUrl, upstreamBaseUrl } from "../src/gateway/upstream";
+import { catalogUrl, resolveUpstream, routeFor } from "../src/gateway/upstream";
 import { OutputCollector, observeResponse, persistExchange, prepareExchange, dispatchExchange } from "../src/gateway/record";
 
 // Test actual production modules and SQL, replacing only the external HTTP call.
@@ -342,85 +342,81 @@ test("please-remember writes the original words into long-term memory", async ()
   assert.match(JSON.stringify(calls[1].query.messages), /\[quote\].*芝麻开门|\[authored\].*芝麻开门/);
 });
 
-test("upstream forwards the Gateway ID header to CF, never to custom upstreams", async () => {
+test("CF chat rides compat with the gateway id in the URL; custom upstreams stay bearer-only", async () => {
   env.AI_GATEWAY_ID = "panel-gateway";
   setConfig({ ...config(), upstream: { address: "a".repeat(32) } });
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[0].headers["cf-aig-gateway-id"], "panel-gateway");
+  assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${"a".repeat(32)}/panel-gateway/compat/chat/completions`);
+  assert.equal(calls[0].headers.authorization, "Bearer cf-token");
+  assert.equal(calls[0].headers["cf-aig-authorization"], undefined);
   calls = [];
   setConfig(config());
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[0].headers["cf-aig-gateway-id"], undefined);
+  assert.equal(calls[0].url, "https://upstream.test/ai/v1/chat/completions");
+  assert.equal(calls[0].headers["cf-aig-authorization"], undefined);
 });
 
-test("every CF paste form sends chat traffic to REST and only the catalog to compat", () => {
+test("every CF paste form routes chat to compat and native protocols to provider endpoints", () => {
   const acct = "d121aa7cd60ccebd6213c931efce41da";
   const envLike = {} as any;
-  const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`;
-  const rest = `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`;
+  const gw = `https://gateway.ai.cloudflare.com/v1/${acct}/default`;
   const forms = [
     acct,
     acct.toUpperCase(),
-    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/`,
-    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`,
-    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/models`,
-    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/chat/completions`,
-    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/messages`,
-    `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/v1`,
-    `https://gateway.ai.cloudflare.com/v1/${acct}/default`,
+    `${gw}/compat/`,
+    `${gw}/compat`,
+    `${gw}/compat/models`,
+    `${gw}/compat/chat/completions`,
+    `${gw}/compat/messages`,
+    `${gw}/compat/v1`,
+    `${gw}`,
     `https://gateway.ai.cloudflare.com/v1/${acct}/compat/`,
     `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`,
     `https://api.cloudflare.com/client/v4/accounts/${acct}/workers/scripts`
   ];
   for (const address of forms) {
     const cfg = { version: 3 as const, upstream: { address }, identities: [] };
-    assert.equal(catalogUrl(envLike, cfg), `${compat}/models`, address);
-    assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), rest, address);
-    assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), rest, address);
-    assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), rest, address);
+    const resolved = resolveUpstream(envLike, cfg);
+    assert.equal(catalogUrl(envLike, cfg), `${gw}/compat/models`, address);
+    assert.deepEqual(routeFor(resolved, "chat", "openrouter/anthropic/claude-haiku-4.5"),
+      { url: `${gw}/compat/chat/completions`, model: "openrouter/anthropic/claude-haiku-4.5", auth: "bearer" }, address);
+    assert.deepEqual(routeFor(resolved, "messages", "anthropic/claude-opus-5"),
+      { url: `${gw}/anthropic/v1/messages`, model: "claude-opus-5", auth: "cf-aig" }, address);
+    assert.deepEqual(routeFor(resolved, "responses", "openai/gpt-5.6-luna"),
+      { url: `${gw}/openai/responses`, model: "gpt-5.6-luna", auth: "cf-aig" }, address);
   }
 });
 
-test("the Gateway ID names the catalog; chat traffic rides REST with the header", () => {
+test("the panel Gateway ID names every CF surface", () => {
   const acct = "b".repeat(32);
   const envLike = { AI_GATEWAY_ID: "my-gw" } as any;
   const cfg = { version: 3 as const, upstream: { address: acct }, identities: [] };
-  const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat`;
-  const rest = `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`;
-  assert.equal(upstreamBaseUrl(envLike, cfg, "chat"), rest);
-  assert.equal(upstreamBaseUrl(envLike, cfg, "messages"), rest);
-  assert.equal(upstreamBaseUrl(envLike, cfg, "responses"), rest);
-  assert.equal(catalogUrl(envLike, cfg), `${compat}/models`);
-  assert.equal(
-    catalogUrl(envLike, { ...cfg, upstream: { address: `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw/compat/` } }),
-    `${compat}/models`
-  );
+  const resolved = resolveUpstream(envLike, cfg);
+  const gw = `https://gateway.ai.cloudflare.com/v1/${acct}/my-gw`;
+  assert.equal(catalogUrl(envLike, cfg), `${gw}/compat/models`);
+  assert.equal(routeFor(resolved, "chat", "openai/gpt-5.1").url, `${gw}/compat/chat/completions`);
+  assert.equal(routeFor(resolved, "messages", "anthropic/claude-opus-5").url, `${gw}/anthropic/v1/messages`);
+  assert.equal(routeFor(resolved, "responses", "openai/gpt-5.1").url, `${gw}/openai/responses`);
 });
 
-test("chat to a CF account uses REST plus the Gateway ID header", async () => {
-  const acct = "c".repeat(32);
-  env.AI_GATEWAY_ID = "custom-gw";
-  setConfig({ ...config(), upstream: { address: acct } });
-  await run("/v1/chat/completions", { model: "custom-foo/bar", messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[0].url, `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1/chat/completions`);
-  assert.equal(calls[0].headers["cf-aig-gateway-id"], "custom-gw");
+test("messages on CF strips the provider prefix and carries the token as cf-aig-authorization", async () => {
+  setConfig({ ...config(), upstream: { address: "c".repeat(32) } });
+  await run("/v1/messages", { model: "anthropic/claude-opus-5", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(calls[0].url, `https://gateway.ai.cloudflare.com/v1/${"c".repeat(32)}/default/anthropic/v1/messages`);
+  assert.equal(calls[0].query.model, "claude-opus-5");
+  assert.equal(calls[0].headers["cf-aig-authorization"], "Bearer cf-token");
+  assert.equal(calls[0].headers.authorization, undefined);
+  assert.equal(calls[0].headers["anthropic-version"], "2023-06-01");
 });
 
-test("a pasted compat URL keeps the catalog on compat while chat protocols ride REST", async () => {
-  const acct = "d121aa7cd60ccebd6213c931efce41da";
-  const pasted = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat/`;
-  const compat = `https://gateway.ai.cloudflare.com/v1/${acct}/default/compat`;
-  const rest = `https://api.cloudflare.com/client/v4/accounts/${acct}/ai/v1`;
-  setConfig({ ...config(), upstream: { address: pasted } });
-  const models = await run("/v1/models");
-  assert.equal(models.response.headers.get("x-aelios-models"), "upstream");
-  assert.equal(calls[0].url, `${compat}/models`);
-  await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[1].url, `${rest}/chat/completions`);
-  await run("/v1/messages", { model: "partner", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
-  assert.equal(calls[2].url, `${rest}/messages`);
-  await run("/v1/responses", { model: "partner", input: "Hi" });
-  assert.equal(calls[3].url, `${rest}/responses`);
+test("messages and responses on CF reject providers with no native endpoint, before any upstream call", async () => {
+  setConfig({ ...config(), upstream: { address: "d".repeat(32) } });
+  const messages = await run("/v1/messages", { model: "openai/gpt-5.1", max_tokens: 16, messages: [{ role: "user", content: "Hi" }] });
+  assert.equal(messages.response.status, 400);
+  assert.match(messages.text, /chat\/completions/);
+  const responses = await run("/v1/responses", { model: "anthropic/claude-opus-5", input: "Hi" });
+  assert.equal(responses.response.status, 400);
+  assert.equal(calls.length, 0);
 });
 
 test("settings edited in the admin page override deployment vars everywhere", async () => {
