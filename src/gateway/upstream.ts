@@ -28,6 +28,6 @@ export async function callGatewayUpstream(env: Env, config: GatewayConfig, ident
   if (protocol === "messages" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
   applyThinkingPolicy(body, identity, protocol, headers);
   return fetch(`${upstreamBaseUrl(env, config)}/${PATHS[protocol]}`, {
-    method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "error"
+    method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"
   });
 }
