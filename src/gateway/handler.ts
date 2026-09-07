@@ -10,7 +10,7 @@ import type { Env } from "../types";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 import { findIdentity, identityNamespace, identityReadNamespaces, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
-import { appendMemory, autoCacheBreakpoints, classifyTurn, hasServerState, recentHumanTexts, validateBody, type Body } from "./protocol";
+import { appendMemory, autoCacheBreakpoints, classifyTurn, hasServerState, inputItems, recentHumanTexts, validateBody, visibleText, type Body } from "./protocol";
 import { RequestContractError } from "./request";
 import { dispatchExchange, persistHumanUtterance, observeResponse, prepareExchange } from "./record";
 import { callGatewayUpstream, prepareGatewayRequest, UpstreamRouteError } from "./upstream";
@@ -32,7 +32,7 @@ export async function recallPatch(
   query: string,
   ctx: ExecutionContext,
   recent: string[] = [],
-  options: { excludeMessageIds?: string[]; recallId?: string } = {}
+  options: { excludeMessageIds?: string[]; recallId?: string; excludeVisibleIn?: string } = {}
 ): Promise<string> {
   const namespace = identityNamespace(identity);
   const namespaces = identityReadNamespaces(identity);
@@ -66,7 +66,8 @@ export async function recallPatch(
         query,
         tokens: shaped.lexicalTokens,
         limit: evidence ? 4 : 2,
-        excludeIds: options.excludeMessageIds
+        excludeIds: options.excludeMessageIds,
+        excludeVisibleIn: options.excludeVisibleIn
       })
     ]);
 
@@ -237,7 +238,10 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       const prior = recentHumanTexts(body, protocol).slice(0, -1).slice(-3);
       patch = await recallPatch(env, identity, turn.text, ctx, prior, {
         excludeMessageIds: exchange ? [exchange.userId] : [],
-        recallId
+        recallId,
+        // A quote still present in this request's history is visible; recalling it
+        // would spend budget without adding information.
+        excludeVisibleIn: inputItems(body, protocol).map(item => visibleText(item.content)).join("\n")
       });
       memoryStatus = patch ? "injected" : "empty";
     }

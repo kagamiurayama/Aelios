@@ -87,6 +87,17 @@ async function searchQuotesLike(
     .filter((row) => row.score > 0 && isPreciousRelevant(row.content, tokens))
     .sort((a, b) => b.score - a.score || b.created_at.localeCompare(a.created_at));
 }
+/** A verbatim quote already present in the request's own history is visible to
+ * both parties; recalling it spends budget without adding information. */
+export function quoteVisibleIn(hit: Pick<QuoteHit, "content" | "excerpt">, contextText: string): boolean {
+  const ctx = contextText.replace(/\s+/g, " ");
+  if (!ctx.trim()) return false;
+  let core = (hit.excerpt || hit.content).replace(/\s+/g, " ").replace(/^[…\s]+|[…\s]+$/g, "");
+  if (core.length > 200) core = core.slice(Math.floor((core.length - 200) / 2), Math.floor((core.length - 200) / 2) + 200);
+  if (core.length < 8) core = hit.content.replace(/\s+/g, " ").trim().slice(0, 160);
+  return core.length >= 8 && ctx.includes(core);
+}
+
 
 export async function searchQuotes(
   db: D1Database,
@@ -96,6 +107,8 @@ export async function searchQuotes(
     tokens?: string[];
     limit?: number;
     excludeIds?: string[];
+    /** Current request's visible conversation text; quotes already in it are skipped. */
+    excludeVisibleIn?: string;
   }
 ): Promise<QuoteHit[]> {
   const tokens = input.tokens ?? tokenizeForIndex(input.query, 12);
@@ -119,8 +132,11 @@ export async function searchQuotes(
     const existing = byId.get(hit.id);
     if (!existing || hit.score > existing.score) byId.set(hit.id, hit);
   }
+  const fresh = input.excludeVisibleIn
+    ? [...byId.values()].filter(hit => !quoteVisibleIn(hit, input.excludeVisibleIn!))
+    : [...byId.values()];
+  return clusterQuotes(fresh, limit);
 
-  return clusterQuotes([...byId.values()], limit);
 }
 
 function clusterQuotes(hits: QuoteHit[], limit: number): QuoteHit[] {
