@@ -975,14 +975,14 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
           <input x-model="gwAddress" class="mt-2 h-11 w-full rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm text-zinc-100 outline-none transition duration-150 ease-in-out focus:border-coral" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1">
           <p class="mt-1 text-[11px] leading-5 text-zinc-500">chat 走 compat,全 provider;messages / responses 走各 provider 原生端点,模型名带 provider/ 前缀;模型列表走 compat 目录。BYOK 钥匙在 AI Gateway 仪表盘;CF 令牌去 Worker Secrets 加 CLOUDFLARE_API_TOKEN。Gateway ID 在下方环境设置里,默认 default。</p>
           <div class="mt-4 flex items-center justify-between">
-            <label class="text-xs text-zinc-400">老公们</label>
-            <button type="button" @click="gwAdd()" class="tap rounded-2xl border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 transition duration-150 ease-in-out hover:border-coral hover:text-zinc-100">+ 添加一位</button>
+            <label class="text-xs text-zinc-400">助手</label>
+            <button type="button" @click="gwAdd()" class="tap rounded-2xl border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 transition duration-150 ease-in-out hover:border-coral hover:text-zinc-100">+ 添加助手</button>
           </div>
           <p class="mt-1 text-[11px] text-zinc-500">名字即地址路径段;主模型支持 * 通配,只有主模型有记忆、进 Dream。</p>
           <template x-for="(idn, i) in gwIdentities" :key="i">
             <div class="mt-2 space-y-2 rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-3">
               <div class="flex items-center gap-2">
-                <input x-model="idn.slug" class="h-10 min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="名字,如 danjiu">
+                <input x-model="idn.slug" class="h-10 min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="名字,如 coder">
                 <button type="button" @click="gwIdentities.splice(i, 1)" class="tap shrink-0 rounded-xl border border-zinc-800 px-3 py-2 text-xs text-zinc-500 transition hover:border-coral hover:text-zinc-100">移除</button>
               </div>
               <input x-model="idn.modelsText" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="主模型,逗号分隔,如 anthropic/claude-opus-5, *fable*">
@@ -1006,7 +1006,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
               </details>
             </div>
           </template>
-          <div x-show="!gwIdentities.length" class="mt-2 text-xs text-zinc-500">还没有老公。点「读取」拉取线上配置,或直接添加。</div>
+          <div x-show="!gwIdentities.length" class="mt-2 text-xs text-zinc-500">还没有助手。点「读取」拉取线上配置,或直接添加。</div>
           <template x-if="gwGroups.length">
             <div class="mt-4">
               <label class="text-xs text-zinc-400">环境设置</label>
@@ -1253,7 +1253,7 @@ function memoryAdmin() {
           config.settings = settings;
         }
         const result = await this.request('/api/gateway/config', { method: 'PUT', body: JSON.stringify(config) });
-        this.notify('保存好了,' + (result.identities || 0) + ' 位在岗,环境设置最长 10 秒全网生效');
+        this.notify('保存好了,' + (result.identities || 0) + ' 个助手,环境设置最长 10 秒全网生效');
       } catch (error) { this.notify('网关保存失败:' + error.message); }
       this.gwBusy = false;
     },
