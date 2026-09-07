@@ -10,7 +10,7 @@ import type { Env } from "../types";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 import { findIdentity, identityNamespace, identityReadNamespaces, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
-import { appendMemory, classifyTurn, hasServerState, memoryThinkingCompatible, recentHumanTexts, validateBody, type Body } from "./protocol";
+import { appendMemory, classifyTurn, hasServerState, recentHumanTexts, validateBody, type Body } from "./protocol";
 import { RequestContractError } from "./request";
 import { dispatchExchange, persistHumanUtterance, observeResponse, prepareExchange } from "./record";
 import { callGatewayUpstream, prepareGatewayRequest, UpstreamRouteError } from "./upstream";
@@ -230,9 +230,7 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       console.error("gateway human utterance persist failed", { identity: identity.slug, error });
     }
   }
-  const thinkingCompatible = memoryThinkingCompatible(prepared.body, protocol, prepared.headers);
-  if (main && turn.kind === "human" && !thinkingCompatible) memoryStatus = "skipped-thinking";
-  if (main && turn.kind === "human" && turn.text && thinkingCompatible) {
+  if (main && turn.kind === "human" && turn.text) {
     try {
       const prior = recentHumanTexts(body, protocol).slice(0, -1).slice(-3);
       patch = await recallPatch(env, identity, turn.text, ctx, prior, {

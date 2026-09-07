@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { normalizeRequest, validateRequest, RequestContractError } from "../src/gateway/request";
-import { appendMemory, applyThinkingPolicy, memoryThinkingCompatible, sanitizeCacheControl } from "../src/gateway/protocol";
+import { appendMemory, applyThinkingPolicy, sanitizeCacheControl } from "../src/gateway/protocol";
 
 const base = () => ({ model: "claude-test", max_tokens: 2048, messages: [{ role: "user", content: "hello" }] });
 const assistant = { role: "assistant", content: [
@@ -113,11 +113,7 @@ test("the binding policy is present through tool continuations and later signed 
     assert.equal(body.thinking.block_binding.prefix_mismatch_behavior, "drop_block");
     assert.equal(headers.get("anthropic-beta")!.split(",").length, 2);
     assert.deepEqual(messages, before);
-    assert.equal(memoryThinkingCompatible(body, "messages", headers), true);
     assert.doesNotThrow(() => validateRequest(body, "messages", headers));
-  }
-  for (const thinking of [undefined, { type: "adaptive" }, { type: "enabled", budget_tokens: 1024 }]) {
-    assert.equal(memoryThinkingCompatible({ ...base(), thinking }, "messages", new Headers()), false);
   }
   const disabled: any = { ...base(), thinking: { type: "disabled" }, messages: [base().messages[0], assistant, result] };
   const before = structuredClone(disabled);
