@@ -62,7 +62,7 @@ details{margin-top:8px}summary{cursor:pointer;color:#a6b4c3}
 .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
 </style><body>
 <small>AELIOS / MEMORY GATEWAY</small><h1>带着记忆，随处接入。</h1>
-<p>一个老公一个地址，模型名原样透传。只有主模型有记忆、进 Dream，其余模型安静路过。<a href="/admin">记忆管理 →</a></p>
+<p>一个助手一个地址，模型名原样透传。只有主模型有记忆、进 Dream，其余模型安静路过。<a href="/admin">记忆管理 →</a></p>
 
 <section><label>管理钥匙（Worker 设置里的 CHATBOX_API_KEY，只留在本页）<input id="key" type="password" autocomplete="off"></label>
 <div class="row"><button id="load">读取</button><button id="save">保存</button></div><div id="status" role="status" aria-live="polite"></div></section>
@@ -70,8 +70,8 @@ details{margin-top:8px}summary{cursor:pointer;color:#a6b4c3}
 <section><h2>上游连接</h2>
 <label>上游地址<input id="cfAddress" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1"><div class="hint">最省心:填 32 位账号 ID,贴 Cloudflare 网关网址也能认。chat 走 compat,全 provider;messages / responses 走各 provider 的原生端点,模型名记得带 <code>provider/模型</code> 前缀;模型列表走 <code>…/compat/models</code>。BYOK 全程生效,provider 钥匙在 AI Gateway 仪表盘里存。Gateway ID 在下面环境设置里,默认 <code>default</code>。填别的 OpenAI 兼容地址(如 new-api)就原样用。令牌去 Worker Secrets 加 <code>CLOUDFLARE_API_TOKEN</code>。</div></label></section>
 
-<section><h2>老公们</h2><p class="hint">每位三格：名字、主模型、钥匙。主模型支持 <code>*</code> 通配，写不写 <code>anthropic/</code> 前缀都能认。</p>
-<div id="identities"></div><button id="addIdentity" class="ghost">+ 添加一位</button></section>
+<section><h2>助手</h2><p class="hint">每位三格：名字、主模型、钥匙。主模型支持 <code>*</code> 通配，写不写 <code>anthropic/</code> 前缀都能认。</p>
+<div id="identities"></div><button id="addIdentity" class="ghost">+ 添加助手</button></section>
 
 <section><h2>环境设置</h2><p class="hint">每格留空就是用默认值，灰字是当前生效的值。点「读取」后出现。</p><div id="settings"></div>
 <h3>钥匙状态</h3><p class="hint">钥匙都在 Worker 设置里，这里只看在不在。</p><div id="secrets"></div></section>
@@ -88,8 +88,8 @@ function h(tag,attrs,...kids){const n=document.createElement(tag);for(const k in
 function field(labelText,hintText,value,placeholder){const input=h('input',{value:value||'',placeholder:placeholder||''});const label=h('label',{text:labelText});label.append(input);if(hintText)label.append(h('div',{class:'hint',text:hintText}));return{label,input}}
 function addCard(data){
   data=data||{};
-  const slug=field('名字','就是地址里那一段，比如 danjiu。小号英文，别用空格。',data.slug,'danjiu');
-  const models=field('主模型（逗号分隔，可多选）','只有主模型的对话召回记忆、进 Dream；其余模型在这位名下安静透传。',(data.models||[]).join(', '),'anthropic/claude-opus-4-5, *fable*');
+  const slug=field('名字','就是地址里那一段，比如 coder。小号英文，别用空格。',data.slug,'coder');
+  const models=field('主模型（逗号分隔，可多选）','只有主模型的对话召回记忆、进 Dream；其余模型在这个助手名下安静透传。',(data.models||[]).join(', '),'anthropic/claude-opus-4-5, *sonnet*');
   const ns=field('写入空间','新对话写到这里，留空就和名字同名。',data.namespace,'');
   const reads=field('召回空间（逗号分隔）','留空只读写入空间；填写多个空间可共享、保留旧库；填 [] 只记录不召回。',data.readNamespaces ? (data.readNamespaces.length ? data.readNamespaces.join(', ') : '[]') : '', '');
   const keysBox=h('div',{class:'keys'});
@@ -98,10 +98,10 @@ function addCard(data){
   const thinking=field('Claude 思考块','passthrough 保留思考，未明确关闭思考时跳过注入；drop_block 允许临时记忆，需上游支持 beta，失配的思考由上游丢弃。',data.anthropicThinking||'passthrough','');
   const budget=field('单次记忆字数上限','留空默认 6000。',data.maxMemoryChars||'','');
   const del=h('button',{class:'danger',text:'移除'});del.onclick=()=>card.remove();
-  const title=h('h3',{text:data.slug||'新老公'},del);
-  slug.input.addEventListener('input',()=>{title.firstChild.textContent=slug.input.value.trim()||'新老公'});
+  const title=h('h3',{text:data.slug||'新助手'},del);
+  slug.input.addEventListener('input',()=>{title.firstChild.textContent=slug.input.value.trim()||'新助手'});
   const advanced=h('details');advanced.append(h('summary',{text:'高级'}),thinking.label,budget.label);
-  const card=h('div',{class:'card'},title,slug.label,models.label,ns.label,reads.label,h('label',{text:'谁能用这位'}),keysBox,advanced);
+  const card=h('div',{class:'card'},title,slug.label,models.label,ns.label,reads.label,h('label',{text:'谁能用这个助手'}),keysBox,advanced);
   card.collect=()=>{
     const keys=boxes.filter(b=>b.input.checked).map(b=>b.name);
     const identity={slug:slug.input.value.trim(),keys,models:models.input.value.split(/[,，\\n]/).map(s=>s.trim()).filter(Boolean)};
@@ -141,6 +141,6 @@ async function request(method,body){
 el('load').onclick=async()=>{try{const config=await request('GET');render(config);
   const r=await fetch('/api/gateway/env',{headers:{authorization:'Bearer '+el('key').value}});renderEnv(await r.json());settingsLoaded=true;
   status('读好了。')}catch(e){status(e.message)}};
-el('save').onclick=async()=>{try{const data=await request('PUT',collect());status('保存好了，'+data.identities+' 位在岗。环境设置最长 10 秒全网生效。')}catch(e){status(e.message)}};
+el('save').onclick=async()=>{try{const data=await request('PUT',collect());status('保存好了，'+data.identities+' 个助手。环境设置最长 10 秒全网生效。')}catch(e){status(e.message)}};
 el('addIdentity').onclick=()=>addCard();
 </script></body></html>`;

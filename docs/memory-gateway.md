@@ -25,7 +25,7 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 配置只有三层，全部在 `/admin/gateway` 页面完成：
 
 1. **连接**：CF 账号 ID（或完整地址）。token 不放面板，放 Worker Secret `CLOUDFLARE_API_TOKEN`。
-2. **身份（老公）**：每位三格——名字（slug，即 URL 路径段）、主模型列表、可用钥匙。
+2. **助手**：每位三格——名字（slug，即 URL 路径段）、主模型列表、可用钥匙。
    写入空间 `namespace` 默认同名；可另设 `readNamespaces` 召回空间列表。
 3. **环境设置**：`settings` 白名单里的运行参数，面板直接改，覆盖部署默认值。
 
@@ -46,16 +46,16 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 2. 按原部署流程创建 D1、Vectorize 和 Queue，应用全部 migrations，包含 `0012_memory_gateway.sql`。
 3. Worker Secrets 只放两把钥匙：`CHATBOX_API_KEY`（自己编的，进面板用）和 `CLOUDFLARE_API_TOKEN`
    （使用现有 AI Gateway token 权限配置；第三方 Provider 密钥在 CF BYOK 面板管理）。
-4. 打开 `/admin/gateway`，填 CF 账号 ID，添加身份，保存。
-5. 客户端按身份接入：
+4. 打开 `/admin/gateway`，填 CF 账号 ID，添加助手（比如 `coder`），保存。
+5. 客户端按助手接入：
 
 | 客户端 | 配置 |
 | --- | --- |
-| Chatbox 等 OpenAI 兼容 | base URL `https://<host>/<身份>/v1`，填 `CHATBOX_API_KEY` |
-| Claude Code | `ANTHROPIC_BASE_URL=https://<host>/<身份>`，token 同上 |
-| Codex | `base_url = "https://<host>/<身份>/v1"`，`wire_api = "responses"` |
+| Chatbox 等 OpenAI 兼容 | base URL `https://<host>/coder/v1`，填 `CHATBOX_API_KEY` |
+| Claude Code | `ANTHROPIC_BASE_URL=https://<host>/coder`，token 同上 |
+| Codex | `base_url = "https://<host>/coder/v1"`，`wire_api = "responses"` |
 
-不带身份的 `/v1/...` 走该钥匙的第一个身份，方便单身份使用。
+不带助手名的 `/v1/...` 走该钥匙的第一个助手，方便只配一个的时候用。
 轮询和多 key 池需要时自行部署 new-api 之类的上游，把它的地址填进「连接」即可——配置模型不变。
 
 ## 临时记忆生命周期
@@ -82,19 +82,19 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 
 ```json
 {
-  "slug": "danjiu",
+  "slug": "coder",
   "keys": ["CHATBOX_API_KEY"],
-  "models": ["*opus*", "*fable*"],
-  "namespace": "danjiu-new",
-  "readNamespaces": ["danjiu-new", "danjiu-old", "shared-project"]
+  "models": ["*opus*", "*sonnet*"],
+  "namespace": "coder",
+  "readNamespaces": ["coder", "coder-old", "shared-docs"]
 }
 ```
 
-多个身份可以读同一空间，也可写同一空间。迁移时让新对话写新空间，召回保留旧空间；这里不搬移 D1 行或 Vectorize 索引。
+多个助手可以读同一空间，也可写同一空间。迁移时让新对话写新空间，召回保留旧空间；这里不搬移 D1 行或 Vectorize 索引。
 每个空间独立检索，同类候选轮流合并、同类型同内容去重，最后统一执行一次条数/字数预算。
 一个空间失败仍可用其他空间，全部失败报告召回不可用；trace 列出失败空间。
 注入计数回写条目所属空间，`recall_explain` 存在写入空间，记录每条来源空间。
-授权某身份读取共享空间，意味着该身份的所有可用钥匙都可召回其内容。
+授权某助手读取共享空间，意味着该助手的所有可用钥匙都可召回其内容。
 Cron 继续维护配置的写入空间，避免只读共享关系无意触发另一个空间的 Dream。
 
 ### Anthropic thinking
