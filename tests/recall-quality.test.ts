@@ -291,6 +291,37 @@ test("raw utterances are searchable before they become facts", async () => {
   sqlite.close();
 });
 
+test("quotes already visible in the request history are not recalled", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
+    source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
+  )`);
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "msg_1", "c", "ns", "user", "请记住调试暗号是芝麻开门", "gw", "2026-09-06T12:00:00.000Z", 0
+  );
+  const db = {
+    prepare(sql: string) {
+      const statement = sqlite.prepare(sql);
+      let args: unknown[] = [];
+      const api = {
+        bind(...values: unknown[]) { args = values; return api; },
+        async all() { return { results: statement.all(...args) }; },
+        async first() { return statement.get(...args) || null; },
+        async run() { return { meta: { changes: statement.run(...args).changes } }; }
+      };
+      return api;
+    }
+  };
+  const visible = await searchQuotes(db as any, { namespace: "ns", query: "调试暗号是什么？",
+    excludeVisibleIn: "前面的话\n请记住调试暗号是芝麻开门\n后面的话" });
+  assert.equal(visible.length, 0);
+  const forgotten = await searchQuotes(db as any, { namespace: "ns", query: "调试暗号是什么？",
+    excludeVisibleIn: "上下文压缩后只剩完全不相关的内容" });
+  assert.ok(forgotten.some((hit) => hit.content.includes("芝麻开门")));
+  sqlite.close();
+});
+
 test("remember-now extracts the original words after the trigger", () => {
   assert.equal(parseRememberNow("请记住调试暗号是芝麻开门"), "调试暗号是芝麻开门");
   assert.equal(parseRememberNow("帮我记一下：喜欢 Cloudflare"), "喜欢 Cloudflare");
