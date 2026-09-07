@@ -5,6 +5,8 @@ export interface SurfaceEntry {
   kind: string;
   content: string;
   id?: string;
+  /** Accounting provenance; never accept a namespace from the client request. */
+  namespace?: string;
 }
 
 export interface SurfaceOptions {
@@ -31,7 +33,8 @@ export function assembleRecallSurface(entries: SurfaceEntry[], options: SurfaceO
     .map((entry) => ({
       kind: entry.kind.trim(),
       content: truncateEntry(entry.content.trim(), maxChars),
-      ...(entry.id ? { id: entry.id } : {})
+      ...(entry.id ? { id: entry.id } : {}),
+      ...(entry.namespace ? { namespace: entry.namespace } : {})
     }))
     .filter((entry) => entry.kind && entry.content)
     .slice(0, Math.max(maxItems, 0));

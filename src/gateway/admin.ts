@@ -90,21 +90,23 @@ function addCard(data){
   data=data||{};
   const slug=field('名字','就是地址里那一段，比如 danjiu。小号英文，别用空格。',data.slug,'danjiu');
   const models=field('主模型（逗号分隔，可多选）','只有主模型的对话召回记忆、进 Dream；其余模型在这位名下安静透传。',(data.models||[]).join(', '),'anthropic/claude-opus-4-5, *fable*');
-  const ns=field('记忆空间','留空就和名字同名。',data.namespace,'');
+  const ns=field('写入空间','新对话写到这里，留空就和名字同名。',data.namespace,'');
+  const reads=field('召回空间（逗号分隔）','留空只读写入空间；填写多个空间可共享、保留旧库；填 [] 只记录不召回。',data.readNamespaces ? (data.readNamespaces.length ? data.readNamespaces.join(', ') : '[]') : '', '');
   const keysBox=h('div',{class:'keys'});
   const chosen=data.keys||['CHATBOX_API_KEY'];
   const boxes=KEY_OPTIONS.map(([name,label])=>{const input=h('input',{type:'checkbox'});input.checked=chosen.includes(name);const l=h('label',{text:label});l.prepend(input);keysBox.append(l);return{input,name}});
-  const thinking=field('Claude 思考块','默认原样透传；思考开着时会跳过注入。',data.anthropicThinking||'passthrough','');
+  const thinking=field('Claude 思考块','passthrough 保留思考，未明确关闭思考时跳过注入；drop_block 允许临时记忆，需上游支持 beta，失配的思考由上游丢弃。',data.anthropicThinking||'passthrough','');
   const budget=field('单次记忆字数上限','留空默认 6000。',data.maxMemoryChars||'','');
   const del=h('button',{class:'danger',text:'移除'});del.onclick=()=>card.remove();
   const title=h('h3',{text:data.slug||'新老公'},del);
   slug.input.addEventListener('input',()=>{title.firstChild.textContent=slug.input.value.trim()||'新老公'});
   const advanced=h('details');advanced.append(h('summary',{text:'高级'}),thinking.label,budget.label);
-  const card=h('div',{class:'card'},title,slug.label,models.label,ns.label,h('label',{text:'谁能用这位'}),keysBox,advanced);
+  const card=h('div',{class:'card'},title,slug.label,models.label,ns.label,reads.label,h('label',{text:'谁能用这位'}),keysBox,advanced);
   card.collect=()=>{
     const keys=boxes.filter(b=>b.input.checked).map(b=>b.name);
     const identity={slug:slug.input.value.trim(),keys,models:models.input.value.split(/[,，\\n]/).map(s=>s.trim()).filter(Boolean)};
     if(ns.input.value.trim())identity.namespace=ns.input.value.trim();
+    if(reads.input.value.trim())identity.readNamespaces=reads.input.value.trim()==='[]'?[]:reads.input.value.split(/[,，\\n]/).map(s=>s.trim()).filter(Boolean);
     if(thinking.input.value.trim()&&thinking.input.value.trim()!=='passthrough')identity.anthropicThinking=thinking.input.value.trim();
     if(budget.input.value.trim())identity.maxMemoryChars=parseInt(budget.input.value.trim(),10);
     return identity;

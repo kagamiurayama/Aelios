@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import worker from "../src/index";
-import { invalidateSettingsCache, validateConfig } from "../src/gateway/config";
+import { identityNamespace, identityReadNamespaces, invalidateSettingsCache, validateConfig } from "../src/gateway/config";
 import { appendMemory, classifyTurn, canonical } from "../src/gateway/protocol";
 import { catalogUrl, resolveUpstream, routeFor } from "../src/gateway/upstream";
 import { OutputCollector, observeResponse, persistExchange, prepareExchange, dispatchExchange } from "../src/gateway/record";
@@ -87,7 +87,7 @@ test("migrations, native chat recall, namespace isolation, original text and Que
   assert.doesNotMatch(calls[0].query.messages[0].content, /番茄炒蛋/);
   assert.doesNotMatch(calls[0].query.messages[0].content, /other identity/);
   assert.doesNotMatch(calls[0].query.messages[0].content, /\[\{"kind"/);
-  assert.deepEqual(calls[0].query.extra_future_field, body.extra_future_field);
+  assert.equal(calls[0].query.extra_future_field, undefined);
   assert.equal(queue[0].userText, "我们喜欢什么？"); assert.equal(queue[0].completion, "complete");
   await persistExchange(env, queue[0]); await persistExchange(env, queue[0]);
   assert.equal(count("gateway_exchanges"), 1); assert.equal(count("messages"), 2);
@@ -100,7 +100,7 @@ test("migrations, native chat recall, namespace isolation, original text and Que
 });
 test("Anthropic tool_result is not human; client beta, signatures, tools and cache survive", async () => {
   const body = { model: "partner", max_tokens: 1000, tools: [{ name: "t", input_schema: { type: "object" } }],
-    messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "", signature: "opaque" }] },
+    messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "", signature: "opaque" }, { type: "tool_use", id: "t", name: "t", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "Not me", cache_control: { type: "ephemeral" } }] }] };
   const { response } = await run("/v1/messages", body, { "anthropic-beta": "client-beta" });
   assert.equal(response.status, 200); assert.deepEqual(calls[0].query.messages, body.messages);
@@ -263,14 +263,14 @@ test("admin configuration validation, D1 precedence and owner-only writes", asyn
   assert.throws(() => validateConfig({ version: 2, identities: [] }), /version: 3/);
   assert.throws(() => validateConfig({ version: 3, upstream: { address: "http://insecure.test" }, identities: [] }), /HTTPS/);
 });
-test("upstream receives the CF token only, preserving unknown fields and response bytes", async () => {
+test("upstream receives the CF token only, dropping unknown envelope fields and preserving response bytes", async () => {
   const mock = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     assert.equal(String(url), "https://upstream.test/ai/v1/chat/completions");
     const headers = new Headers(init?.headers);
     assert.equal(headers.get("authorization"), "Bearer cf-token");
     assert.equal(headers.get("x-api-key"), null);
-    assert.deepEqual(JSON.parse(init?.body as string).future, { keep: true });
+    assert.equal(JSON.parse(init?.body as string).future, undefined);
     return new Response(' {"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]} ', { headers: { "content-type": "application/json" } });
   };
   try { const result = await run("/v1/chat/completions", { model: "partner", messages: [], future: { keep: true } }); assert.match(result.text, /^ /); }
@@ -281,29 +281,30 @@ test("missing CF token fails loudly instead of leaking another credential", asyn
   const { response, text } = await run("/v1/chat/completions", { model: "partner", messages: [] });
   assert.equal(response.status, 502);
   assert.match(JSON.parse(text).error.message, /CLOUDFLARE_API_TOKEN/);
-  assert.equal(queue[0].completion, "failed");
+  assert.equal(queue.length, 0); // Preflight fails before recording.
 });
-test("thinking passthrough keeps thinking and still injects memory", async () => {
+test("thinking passthrough preserves reasoning without creating ephemeral prefix bindings", async () => {
   precious("partner-a", "Cloudflare fan");
   setConfig(config([{ ...identity(), anthropicThinking: "passthrough" }]));
-  const body = { model: "partner", messages: [{ role: "user", content: "Hi Cloudflare" }], thinking: { type: "adaptive" } };
-  assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "injected");
+  const body = { model: "partner", max_tokens: 2048, messages: [{ role: "user", content: "Hi Cloudflare" }], thinking: { type: "adaptive" } };
+  assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "skipped-thinking");
   assert.deepEqual(calls[0].query.thinking, body.thinking);
-  assert.ok(calls[0].query.messages[0].content.includes("Cloudflare fan"));
+  assert.deepEqual(calls[0].query.messages, body.messages);
   assert.equal((await run("/v1/messages", { ...body, thinking: { type: "disabled" } })).response.headers.get("x-aelios-memory"), "injected");
 });
-test("top-level cache_control is hoisted onto the last system block", async () => {
+test("automatic caching lowers to the last cacheable block without rewriting system", async () => {
   const cc = { type: "ephemeral" };
   const body = { model: "partner", max_tokens: 16, cache_control: cc, system: [{ type: "text", text: "persona" }],
     messages: [{ role: "user", content: [{ type: "text", text: "Hi", cache_control: cc }] }] };
   const { response } = await run("/v1/messages", body);
   assert.equal(response.status, 200);
   assert.equal(calls[0].query.cache_control, undefined);
-  assert.deepEqual(calls[0].query.system[0].cache_control, cc);
+  assert.deepEqual(calls[0].query.system, body.system);
   assert.deepEqual(calls[0].query.messages[0].content[0].cache_control, cc);
   const stringSystem = { model: "partner", max_tokens: 16, cache_control: cc, system: "persona", messages: [{ role: "user", content: "Hi" }] };
   await run("/v1/messages", stringSystem);
-  assert.deepEqual(calls[1].query.system, [{ type: "text", text: "persona", cache_control: cc }]);
+  assert.equal(calls[1].query.system, "persona");
+  assert.deepEqual(calls[1].query.messages[0].content, [{ type: "text", text: "Hi", cache_control: cc }]);
   const noSystem = { model: "partner", max_tokens: 16, cache_control: cc, messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }] };
   await run("/v1/messages", noSystem);
   assert.deepEqual(calls[2].query.messages[0].content[0].cache_control, cc);
@@ -483,4 +484,132 @@ test("settings edited in the admin page override deployment vars everywhere", as
   assert.equal(report.secrets.find((x: any) => x.name === "DEBUG_API_KEY").present, false);
   assert.equal((await worker.fetch(request("/api/gateway/env", undefined, { authorization: "Bearer im-key" }), env, ctx)).status, 401);
   assert.throws(() => validateConfig({ ...config(), settings: { DB: "hijacked" } }), /Unknown setting/);
+});
+
+test("read-space configuration is backwards compatible, bounded, explicit and round-trips via admin", async () => {
+  assert.equal(identityNamespace(identity() as any), "partner-a");
+  assert.deepEqual(identityReadNamespaces(identity() as any), ["partner-a"]);
+  assert.deepEqual(identityReadNamespaces({ ...identity(), readNamespaces: [] } as any), []);
+  for (const readNamespaces of [[""], ["a", "a"], [" a"], [42], "a", Array.from({ length: 9 }, (_, i) => String(i))]) {
+    assert.throws(() => validateConfig({ ...config(), identities: [{ ...identity(), readNamespaces }] }), /readNamespaces/);
+  }
+  const updated = { ...config(), identities: [{ ...identity(), namespace: "new", readNamespaces: ["old", "shared", "new"] }] };
+  assert.equal((await worker.fetch(request("/api/gateway/config", updated, {}, "PUT"), env, ctx)).status, 200);
+  assert.deepEqual(JSON.parse((await run("/api/gateway/config")).text).identities[0].readNamespaces, ["old", "shared", "new"]);
+});
+
+test("cross-space recall shares one budget, deduplicates and records provenance while writes stay in the new space", async () => {
+  const updated = { ...config(), settings: { MEMORY_FILTER_MAX_OUTPUT: "3" }, identities: [{ ...identity(), namespace: "new", readNamespaces: ["old", "shared"] }] };
+  setConfig(updated);
+  precious("old", "Cloudflare old memory"); precious("shared", "Cloudflare shared memory");
+  precious("old", "Cloudflare duplicate"); precious("shared", "Cloudflare duplicate");
+  precious("private", "Cloudflare private memory"); precious("new", "Cloudflare not in read list");
+  const { response } = await run("/v1/chat/completions", { model: "partner", namespace: "private", readNamespaces: ["private"], messages: [{ role: "user", content: "Cloudflare memory" }] });
+  assert.equal(response.status, 200);
+  const prompt = calls[0].query.messages[0].content;
+  assert.match(prompt, /Cloudflare old memory/);
+  assert.match(prompt, /Cloudflare shared memory/);
+  assert.doesNotMatch(prompt, /private memory|not in read list/);
+  assert.equal((prompt.match(/Cloudflare duplicate/g) || []).length, 1);
+  assert.equal((prompt.match(/- \[precious\]/g) || []).length, 3);
+  assert.equal(queue[0].namespace, "new");
+  await persistExchange(env, queue[0]);
+  assert.deepEqual(sqlite.prepare("SELECT DISTINCT namespace FROM messages").all().map(r => r.namespace), ["new"]);
+  const trace = JSON.parse(sqlite.prepare("SELECT payload_json FROM memory_events WHERE event_type = 'recall_explain'").get()!.payload_json as string);
+  assert.deepEqual(trace.read_namespaces, ["old", "shared"]);
+  assert.equal(trace.write_namespace, "new");
+  assert.deepEqual([...new Set(trace.items.map((x: any) => x.namespace))].sort(), ["old", "shared"]);
+});
+
+test("two identities can share a space and disabled recall still records original utterances", async () => {
+  setConfig({ ...config(), identities: [{ ...identity(), namespace: "shared" }, { ...identity(), slug: "other", namespace: "shared", readNamespaces: [] }] });
+  precious("shared", "Cloudflare shared source");
+  const body = { model: "partner", messages: [{ role: "user", content: "Cloudflare" }] };
+  assert.equal((await run("/partner/v1/chat/completions", body)).response.headers.get("x-aelios-memory"), "injected");
+  assert.equal((await run("/other/v1/chat/completions", body)).response.headers.get("x-aelios-memory"), "empty");
+  assert.deepEqual(calls[1].query.messages, body.messages);
+  assert.equal(queue[1].namespace, "shared");
+  assert.equal(queue[1].userText, "Cloudflare");
+  assert.notEqual(queue[0].userId, queue[1].userId);
+});
+
+test("one unavailable space does not suppress healthy recall; trace lists the failed space", async () => {
+  setConfig({ ...config(), identities: [{ ...identity(), readNamespaces: ["broken", "shared"] }] });
+  precious("shared", "Cloudflare healthy source");
+  const prepare = db.prepare;
+  env.DB = { ...db, prepare(sql: string) {
+    const statement = prepare(sql);
+    const bind = statement.bind;
+    statement.bind = (...args: any[]) => {
+      bind(...args);
+      if (sql.includes("FROM precious") && args.includes("broken")) statement.all = async () => { throw Error("space unavailable"); };
+      return statement;
+    };
+    return statement;
+  } };
+  assert.equal((await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Cloudflare" }] })).response.headers.get("x-aelios-memory"), "injected");
+  const trace = JSON.parse(sqlite.prepare("SELECT payload_json FROM memory_events WHERE event_type = 'recall_explain'").get()!.payload_json as string);
+  assert.deepEqual(trace.failed_namespaces, ["broken"]);
+});
+
+test("ordinary-memory injection accounting stays in the source space, not the write space", async () => {
+  setConfig({ ...config(), identities: [{ ...identity(), namespace: "write-only", readNamespaces: ["archive"] }] });
+  env.MEMORY_FILTER_ENABLED = "false";
+  sqlite.prepare(`INSERT INTO memories (id, namespace, type, content, importance, confidence, created_at, updated_at)
+    VALUES ('shared-fact', 'archive', 'fact', 'Cloudflare is our preferred platform', 1, 1, '2026-09-06', '2026-09-06')`).run();
+  const { response } = await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Cloudflare platform" }] });
+  assert.equal(response.headers.get("x-aelios-memory"), "injected");
+  const lifecycle = sqlite.prepare("SELECT namespace, last_injected_at FROM memory_lifecycle WHERE memory_id = 'shared-fact'").get();
+  assert.equal(lifecycle?.namespace, "archive");
+  assert.ok(lifecycle?.last_injected_at);
+});
+
+test("invalid Anthropic requests fail before HTTP, recall or human-memory writes", async () => {
+  for (const extra of [{ max_tokens: undefined }, { max_tokens: "64" }, { thinking: "bad" },
+    { thinking: { type: "enabled", budget_tokens: 32 } }, { thinking: { type: "oops" } },
+    { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "orphan", content: "done" }] }] }]) {
+    const { response, text } = await run("/v1/messages", { model: "partner", max_tokens: 2048,
+      messages: [{ role: "user", content: "请记住：不能保存这句" }], ...extra });
+    assert.equal(response.status, 400, text);
+    assert.equal(JSON.parse(text).error.type, "invalid_request_error");
+  }
+  assert.equal(calls.length, 0); assert.equal(queue.length, 0);
+  assert.equal(count("messages"), 0); assert.equal(count("memories"), 0); assert.equal(count("memory_events"), 0);
+});
+
+test("normalization runs on side models without enabling thinking; session metadata still separates recordings", async () => {
+  const body = { model: "side-model", max_tokens: 128, display: "UI", output_config: { effort: "low" },
+    messages: [{ role: "user", content: "hello", ui_id: "local" }] };
+  const side = await run("/v1/messages", body);
+  assert.equal(side.response.status, 200);
+  assert.equal(side.response.headers.get("x-aelios-normalized"), "2");
+  assert.equal(calls[0].query.display, undefined);
+  assert.equal(calls[0].query.thinking, undefined);
+  assert.deepEqual(calls[0].query.output_config, body.output_config);
+  assert.equal(queue.length, 0);
+  for (const session_id of ["one", "two"]) await run("/v1/messages", { ...body, model: "partner", thinking: { type: "disabled" }, metadata: { session_id, user_id: "u" } });
+  assert.notEqual(queue[0].userId, queue[1].userId);
+  assert.deepEqual(calls[1].query.metadata, { user_id: "u" });
+});
+
+test("memory plus thinking survives the entire simulated tool loop with upstream-owned mismatch handling", async () => {
+  precious("partner-a", "Cloudflare fan");
+  const user = { role: "user", content: "Cloudflare" };
+  const history = [{ role: "user", content: "previous" }, { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "old-signature" }, { type: "text", text: "answer" }] }];
+  const body = { model: "partner", max_tokens: 2048, thinking: { type: "adaptive", display: "omitted" }, messages: [...history, user] };
+  await run("/v1/messages", body);
+  assert.match(calls[0].query.messages.at(-1).content, /Cloudflare fan/);
+  assert.deepEqual(calls[0].query.messages.slice(0, -1), history);
+  const generated = { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "bound-to-injected-prefix" }, { type: "tool_use", id: "t", name: "lookup", input: {} }] };
+  const continuation = { ...body, messages: [...body.messages, generated, { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "done" }] }] };
+  const second = await run("/v1/messages", continuation);
+  assert.equal(second.response.headers.get("x-aelios-memory"), "skipped");
+  assert.deepEqual(calls[1].query.messages, continuation.messages);
+  assert.equal(calls[1].query.thinking.block_binding.prefix_mismatch_behavior, "drop_block");
+  assert.match(calls[1].headers["anthropic-beta"], /thinking-binding-controls/);
+  const mixed = { ...continuation, messages: [...continuation.messages.slice(0, -1), { role: "user", content: [...continuation.messages.at(-1)!.content as any[], { type: "text", text: "Also Cloudflare" }] }] };
+  const third = await run("/v1/messages", mixed);
+  assert.equal(third.response.headers.get("x-aelios-memory"), "injected");
+  assert.equal(calls[2].query.messages.at(-1).content[0].type, "tool_result");
+  assert.deepEqual(calls[2].query.messages.slice(0, -1), mixed.messages.slice(0, -1));
 });

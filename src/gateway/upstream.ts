@@ -1,6 +1,7 @@
 import type { Env } from "../types";
-import { PATHS, type GatewayConfig, type Identity, type Protocol } from "./config";
-import { applyThinkingPolicy, type Body } from "./protocol";
+import { isMainModel, PATHS, type GatewayConfig, type Identity, type Protocol } from "./config";
+import { applyThinkingPolicy, sanitizeCacheControl, type Body } from "./protocol";
+import { normalizeRequest, validateRequest } from "./request";
 
 const ACCOUNT_RE = /^[a-f0-9]{32}$/i;
 /** Second path segment that is a protocol leftover, not a Gateway ID. */
@@ -112,8 +113,8 @@ export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: 
 
 // One call, one upstream. Model names pass through as written (minus the provider
 // prefix on native endpoints); retries and fallback are AI Gateway's own job.
-export async function callGatewayUpstream(env: Env, config: GatewayConfig, identity: Identity,
-  protocol: Protocol, original: Request, body: Body): Promise<Response> {
+export function prepareGatewayRequest(env: Env, config: GatewayConfig, identity: Identity,
+  protocol: Protocol, original: Request, body: Body) {
   const token = env.CLOUDFLARE_API_TOKEN;
   if (!token) throw new Error("Missing Worker secret CLOUDFLARE_API_TOKEN");
   const route = routeFor(resolveUpstream(env, config), protocol, body.model);
@@ -128,9 +129,21 @@ export async function callGatewayUpstream(env: Env, config: GatewayConfig, ident
     if (value) headers.set(name, value);
   }
   if (protocol === "messages" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
-  const out = route.model === body.model ? body : { ...body, model: route.model };
-  applyThinkingPolicy(out, identity, protocol, headers);
+  const normalized = normalizeRequest(body, protocol);
+  const out = normalized.body;
+  out.model = route.model;
+  if (isMainModel(identity, body.model)) applyThinkingPolicy(out, identity, protocol, headers);
+  validateRequest(out, protocol, headers);
+  sanitizeCacheControl(out, protocol);
+  validateRequest(out, protocol, headers);
+  return { route, headers, body: out, removed: normalized.removed };
+}
+export async function callGatewayUpstream(protocol: Protocol, original: Request,
+  prepared: ReturnType<typeof prepareGatewayRequest>, body: Body): Promise<Response> {
+  const { route, headers } = prepared;
+  // Check the actual wire payload, including the gateway's own modifications.
+  validateRequest(body, protocol, headers);
   return fetch(route.url, {
-    method: "POST", headers, body: JSON.stringify(out), signal: original.signal, redirect: "manual"
+    method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"
   });
 }

@@ -103,6 +103,10 @@ Aelios 是一个跑在 Cloudflare 上的记忆服务。你的 AI 客户端（Cha
 
 **API Key** 都填你设的 `CHATBOX_API_KEY`。**Model** 按 `provider/模型` 写真名（如 `anthropic/claude-opus-5`、`openrouter/anthropic/claude-haiku-4.5`)，身份里登记的主模型才有记忆，其余模型安静透传。不带身份名的 `/v1` 走这把钥匙的第一位身份。
 
+身份可分别设置**写入空间**和多个**召回空间**，支持共享项目记忆、写新库继续读旧库；不填召回空间时沿用旧配置。
+请求会经过协议字段净化及 Anthropic 结构预检。thinking 默认透传时，未明确关闭思考就跳过临时注入；需要共存可选 `drop_block`，须上游支持 binding beta。
+配置和限制见 [记忆网关](docs/memory-gateway.md) 与 [请求契约 / thinking 审计](docs/request-contract.md)。
+
 试着说："请记住：我的测试暗号是苹果星星-0428。" 过一会儿问："我的测试暗号是什么？" 答出来就通了。
 
 ## 管理面板（推荐用这个）

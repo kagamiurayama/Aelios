@@ -58,32 +58,45 @@ export function appendMemory(body: Body, protocol: Protocol, patch: string): Bod
   else last.content = [...(last.content || []), { type: protocol === "responses" ? "input_text" : "text", text: patch }];
   return copy;
 }
-// rikkahub-style top-level cache_control is not valid Anthropic API (Vertex answers
-// unrecognizedProperty). Hoist it onto the last system text block, the classic prefix
-// breakpoint; fall back to the last user text block; drop it when nowhere legal exists.
+// Top-level cache_control is official automatic caching, but some Vertex/proxy
+// deployments reject it. Lower to an explicit final cacheable breakpoint, before
+// adding ephemeral memory. Cache markers are excluded from thinking bindings.
+const CACHEABLE = new Set(["text", "image", "document", "search_result", "tool_use", "server_tool_use",
+  "tool_result", "container_upload", "web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result",
+  "bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "tool_search_tool_result", "mcp_tool_result"]);
+export function lastCacheableBlock(body: Body, materialize = false): Body | undefined {
+  for (let i = body.messages.length - 1; i >= 0; i--) {
+    const message = body.messages[i];
+    if (typeof message.content === "string" && message.content) {
+      const block = { type: "text", text: message.content };
+      if (materialize) message.content = [block];
+      return block;
+    }
+    for (let j = (message.content?.length || 0) - 1; j >= 0; j--) {
+      const block = message.content[j];
+      if (object(block) && CACHEABLE.has(block.type)) return block;
+    }
+  }
+  if (typeof body.system === "string" && body.system) {
+    const block = { type: "text", text: body.system };
+    if (materialize) body.system = [block];
+    return block;
+  }
+  return (Array.isArray(body.system) ? body.system.at(-1) : undefined) || body.tools?.at(-1);
+}
 export function sanitizeCacheControl(body: Body, protocol: Protocol): void {
   if (protocol !== "messages" || body.cache_control === undefined) return;
   const cc = body.cache_control;
   delete body.cache_control;
   if (!object(cc)) return;
-  const system = body.system;
-  if (typeof system === "string" && system) {
-    body.system = [{ type: "text", text: system, cache_control: cc }];
-    return;
-  }
-  if (Array.isArray(system)) {
-    for (let i = system.length - 1; i >= 0; i--) {
-      const block = system[i];
-      if (object(block) && !block.cache_control) { block.cache_control = cc; return; }
-    }
-  }
-  const last = body.messages?.[body.messages.length - 1];
-  if (last?.role === "user" && Array.isArray(last.content)) {
-    for (let i = last.content.length - 1; i >= 0; i--) {
-      const block = last.content[i];
-      if (object(block) && block.type === "text" && !block.cache_control) { block.cache_control = cc; return; }
-    }
-  }
+  const last = lastCacheableBlock(body, true);
+  if (object(last) && !last.cache_control) last.cache_control = cc;
+}
+/** A new signature binds today's injected memory, even if old signatures precede it. */
+export function memoryThinkingCompatible(body: Body, protocol: Protocol, headers: Headers): boolean {
+  if (protocol !== "messages" || body.thinking?.type === "disabled") return true;
+  return body.thinking?.block_binding?.prefix_mismatch_behavior === "drop_block" &&
+    (headers.get("anthropic-beta") || "").split(",").map(s => s.trim()).includes("thinking-binding-controls-2026-08-01");
 }
 // Encrypted reasoning stays allowed; only server-owned history breaks request-only memory.
 export function hasServerState(body: Body, protocol: Protocol): boolean {
@@ -92,6 +105,8 @@ export function hasServerState(body: Body, protocol: Protocol): boolean {
 }
 export function applyThinkingPolicy(body: Body, identity: Identity, protocol: Protocol, headers: Headers): void {
   if (protocol !== "messages" || identity.anthropicThinking !== "drop_block" || body.thinking?.type === "disabled") return;
+  // Invalid client values must reach validation, not be coerced into adaptive.
+  if (body.thinking !== undefined && (!object(body.thinking) || !["enabled", "adaptive"].includes(body.thinking.type))) return;
   body.thinking = { type: "adaptive", ...body.thinking,
     block_binding: { ...body.thinking?.block_binding, prefix_mismatch_behavior: "drop_block" } };
   const betas = new Set((headers.get("anthropic-beta") || "").split(",").map(s => s.trim()).filter(Boolean));

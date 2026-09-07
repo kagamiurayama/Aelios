@@ -14,8 +14,10 @@ export interface Upstream {
 }
 export interface Identity {
   slug: string;
-  /** Memory space; defaults to the slug. */
+  /** Write space; defaults to the slug. Existing v3 configs keep their meaning. */
   namespace?: string;
+  /** Explicit recall spaces. Omitted: write space; []: record without recall. */
+  readNamespaces?: string[];
   keys: AuthResult["keyName"][];
   /** Main models: recalled and recorded. Every other model passes through quietly. */
   models: string[];
@@ -62,6 +64,11 @@ export function validateConfig(value: unknown): GatewayConfig {
     slugs.add(identity.slug);
     check(identity.namespace === undefined || text(identity.namespace) && identity.namespace.length <= 128,
       `${where}: namespace must be text (max 128 characters)`);
+    check(identity.readNamespaces === undefined || Array.isArray(identity.readNamespaces) &&
+      identity.readNamespaces.length <= 8 && identity.readNamespaces.every((ns: unknown) =>
+        text(ns) && ns === ns.trim() && ns.length <= 128) &&
+      new Set(identity.readNamespaces).size === identity.readNamespaces.length,
+      `${where}: readNamespaces must contain at most 8 unique, nonblank spaces (max 128 characters each)`);
     check(Array.isArray(identity.keys) && identity.keys.length && identity.keys.every((k: unknown) => KEY_NAMES.includes(String(k))), `${where}: invalid keys`);
     check(Array.isArray(identity.models) && identity.models.length <= 64 &&
       identity.models.every((m: unknown) => text(m) && (m as string).length <= 200),
@@ -103,6 +110,9 @@ export function findIdentity(config: GatewayConfig, auth: AuthResult, slug: stri
 }
 export function identityNamespace(identity: Identity): string {
   return identity.namespace || identity.slug;
+}
+export function identityReadNamespaces(identity: Identity): string[] {
+  return identity.readNamespaces ?? [identityNamespace(identity)];
 }
 export function matchGlob(pattern: string, value: string): boolean {
   const source = pattern.split("*").map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");

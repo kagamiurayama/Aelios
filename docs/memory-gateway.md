@@ -17,7 +17,7 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 | Cron | 对各记录身份的 namespace 运行 Dream、日记与留存清理 |
 
 本轮没有引入 Agents SDK / 自建 loop，也不做三协议之间的转换。
-每个协议敲 CF 对应的原生端点：`/ai/v1/chat/completions`、`/ai/v1/messages`、`/ai/v1/responses`。
+每个协议通过下文的 BYOK 路由访问 CF 对应端点；不再使用消耗 Unified 额度的 REST `/ai/v1` 地址转发聊天。
 模型名原样透传，厂商识别交给 CF 的 `author/model` 命名；选错厂商由 CF 报错。
 
 ## 配置模型
@@ -26,7 +26,7 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 
 1. **连接**：CF 账号 ID（或完整地址）。token 不放面板，放 Worker Secret `CLOUDFLARE_API_TOKEN`。
 2. **身份（老公）**：每位三格——名字（slug，即 URL 路径段）、主模型列表、可用钥匙。
-   记忆空间默认同名。
+   写入空间 `namespace` 默认同名；可另设 `readNamespaces` 召回空间列表。
 3. **环境设置**：`settings` 白名单里的运行参数，面板直接改，覆盖部署默认值。
 
 主模型白名单是唯一的记忆开关：**只有主模型的对话召回记忆、进入 Dream；其余模型安静透传**。
@@ -42,10 +42,10 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 
 ## 首次配置
 
-1. 使用 `feat/gateway-simple` 分支，运行 `npm ci`。测试需要 Node.js 22+。
+1. 使用 `feat/memory-gateway` 分支，运行 `npm ci`。测试需要 Node.js 22+。
 2. 按原部署流程创建 D1、Vectorize 和 Queue，应用全部 migrations，包含 `0012_memory_gateway.sql`。
 3. Worker Secrets 只放两把钥匙：`CHATBOX_API_KEY`（自己编的，进面板用）和 `CLOUDFLARE_API_TOKEN`
-   （CF API token，权限 Account → Workers AI → Read；第三方模型走 Unified Billing 计费）。
+   （使用现有 AI Gateway token 权限配置；第三方 Provider 密钥在 CF BYOK 面板管理）。
 4. 打开 `/admin/gateway`，填 CF 账号 ID，添加身份，保存。
 5. 客户端按身份接入：
 
@@ -74,12 +74,42 @@ Aelios 负责身份、临时召回和自动记录，客户端 Harness 负责工�
 
 如果第一响应只调用工具，后续最终回复可能不再看到记忆。“阅后即焚”不表示清除已经产生的模型影响、加密推理或上游日志。
 
+### 共享和迁移空间
+
+旧 v3 配置无需迁移数据库：`namespace` 继续表示唯一写入空间，省略时使用 slug。
+`readNamespaces` 省略时只读写入空间；显式数组表示**完整召回名单**，不自动补上写入空间；`[]` 表示只记录、不召回。
+最多 8 个唯一空间，只能在管理配置中设置，请求体、请求头都不能覆盖。
+
+```json
+{
+  "slug": "danjiu",
+  "keys": ["CHATBOX_API_KEY"],
+  "models": ["*opus*", "*fable*"],
+  "namespace": "danjiu-new",
+  "readNamespaces": ["danjiu-new", "danjiu-old", "shared-project"]
+}
+```
+
+多个身份可以读同一空间，也可写同一空间。迁移时让新对话写新空间，召回保留旧空间；这里不搬移 D1 行或 Vectorize 索引。
+每个空间独立检索，同类候选轮流合并、同类型同内容去重，最后统一执行一次条数/字数预算。
+一个空间失败仍可用其他空间，全部失败报告召回不可用；trace 列出失败空间。
+注入计数回写条目所属空间，`recall_explain` 存在写入空间，记录每条来源空间。
+授权某身份读取共享空间，意味着该身份的所有可用钥匙都可召回其内容。
+Cron 继续维护配置的写入空间，避免只读共享关系无意触发另一个空间的 Dream。
+
 ### Anthropic thinking
 
-- `passthrough`（默认）：不修改 thinking；记忆照常注入（召回片段只追加在最后一轮 user 消息尾部，不影响历史 thinking 块的前缀签名）。
+- `passthrough`（默认）：不修改 thinking。未明确关闭思考时跳过注入，响应头为 `x-aelios-memory: skipped-thinking`。
+  末尾追加不影响此前 thinking，但会成为**本次新生成 thinking** 的前缀；下轮撤销补丁可能导致签名失配。
 - `drop_block`：在每次请求（含工具续轮）合并 `thinking.block_binding.prefix_mismatch_behavior: "drop_block"`，
   以及 `thinking-binding-controls-2026-08-01` beta header。仅适用于支持该 beta 的线路，会牺牲部分思考连续性。
 - 显式 `thinking.type: "disabled"`：直接临时注入，不添加该 beta。
+- 客户端自己携带合法的 `drop_block` 和对应 beta 时，透传模式也允许注入。
+- 非主模型不自动启用 thinking，不自动添加 binding 设置。
+
+本地只能验证结构，不能验证厂商的加密签名。历史签名块、空 thinking 文本、redacted data 原样保留。
+切换到 disabled 不会修复之前已经失配的历史；更换线路、压缩、修改工具或 system 造成的失配也由上游判断。
+完整审计矩阵、协议白名单范围见 [请求契约与 thinking 边界](request-contract.md)。
 
 ### Responses 状态
 
@@ -121,10 +151,11 @@ Anthropic token counting。使用这些额外端点的客户端需要后续适�
 本网关一次调用一个上游，本地不做主备。
 旧 assembler、缓存断点/滚动缓存已退出对外入口。新网关不重排前缀，也不添加 prompt cache 断点：
 召回内容追加在对话末尾，各家自己的 prompt 缓存照常命中。
-唯一的断点触碰是修复性的：客户端把 `cache_control` 放在请求顶层（Anthropic API 不允许，Vertex 直接
-400 `unrecognizedProperty`）时，提升到末尾 system 文本块上（无 system 则落到末尾 user 文本块），
-客户端已有的块级断点一律不动。
+顶层 `cache_control` 是 Anthropic 已支持的自动缓存字段，但部分 Vertex/代理线路仍会拒绝。
+为兼容现有线路，网关把它转换成注入前最后一个可缓存块上的显式断点；已有断点保留，TTL 冲突或超过 4 个提前返回 400。
+没有顶层缓存设置就不主动添加断点。这个转换不等于保证所有上游支持同一套特性。
 响应头 `x-aelios-identity/memory/provider/model` 用于诊断；实际模型与 Provider 优先读取 `cf-aig-model/provider`。
+`x-aelios-normalized` 表示删除的非规范字段数量，Worker 日志列出字段路径，不记录被删除的值。
 
 ## 验证与下一步
 

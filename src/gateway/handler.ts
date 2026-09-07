@@ -4,15 +4,16 @@ import { recallInjectionBudget } from "../memory/filter";
 import { IMPRESSION_DISCLAIMER } from "../memory/impression";
 import { isEvidenceQuery, isPreciousRelevant, isTemporalQuery, selectRelevantPrecious, shapeRecallQuery } from "../memory/queryShape";
 import { formatQuote, quoteOverlaps, searchQuotes } from "../memory/quotes";
-import { assembleRecallSurface } from "../memory/surface";
+import { assembleRecallSurface, type SurfaceEntry } from "../memory/surface";
 import { buildCoreFingerprint, runRecall } from "../memory/v2/recall";
 import type { Env } from "../types";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
-import { findIdentity, identityNamespace, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
-import { appendMemory, classifyTurn, hasServerState, recentHumanTexts, sanitizeCacheControl, validateBody, type Body } from "./protocol";
+import { findIdentity, identityNamespace, identityReadNamespaces, isMainModel, loadConfig, type Identity, type Protocol } from "./config";
+import { appendMemory, classifyTurn, hasServerState, memoryThinkingCompatible, recentHumanTexts, validateBody, type Body } from "./protocol";
+import { RequestContractError } from "./request";
 import { dispatchExchange, persistHumanUtterance, observeResponse, prepareExchange } from "./record";
-import { callGatewayUpstream, UpstreamRouteError } from "./upstream";
+import { callGatewayUpstream, prepareGatewayRequest, UpstreamRouteError } from "./upstream";
 
 export function gatewayError(protocol: Protocol, message: string, status: number): Response {
   const type = status === 401 ? "authentication_error" : status >= 500 ? "api_error" : "invalid_request_error";
@@ -34,96 +35,130 @@ export async function recallPatch(
   options: { excludeMessageIds?: string[]; recallId?: string } = {}
 ): Promise<string> {
   const namespace = identityNamespace(identity);
+  const namespaces = identityReadNamespaces(identity);
   const recallId = options.recallId ?? newId("rcl");
   const shaped = shapeRecallQuery({ query, recent });
   const budget = recallInjectionBudget(env);
   const evidence = isEvidenceQuery(query);
   const temporal = isTemporalQuery(query);
-  if (budget.maxItems === 0) {
-    console.log("gateway recall decision", { recall_id: recallId, identity: identity.slug, injected: 0, reason: "budget_zero" });
+  if (budget.maxItems === 0 || namespaces.length === 0) {
+    console.log("gateway recall decision", { recall_id: recallId, identity: identity.slug, injected: 0,
+      reason: namespaces.length ? "budget_zero" : "no_read_spaces" });
     return "";
   }
 
-  const precious = await listPrecious(env.DB, { namespace, limit: 80 });
-  const relevantPrecious = selectRelevantPrecious(precious, shaped.lexicalTokens);
-  const [recall, quotes] = await Promise.all([
-    runRecall(env, {
-      namespace,
-      query,
-      recent,
-      k: 12,
-      core_fingerprint: buildCoreFingerprint(relevantPrecious.map(p => p.content)),
-      skip_inject_mark: true,
-      attach_week_blocks: temporal,
-      waitUntil: promise => ctx.waitUntil(promise.catch(() => console.error("gateway recall accounting failed")))
-    }),
-    searchQuotes(env.DB, {
-      namespace,
-      query,
-      tokens: shaped.lexicalTokens,
-      limit: evidence ? 4 : 2,
-      excludeIds: options.excludeMessageIds
-    })
-  ]);
+  const spaces = await Promise.allSettled(namespaces.map(async (namespace) => {
+    const precious = await listPrecious(env.DB, { namespace, limit: 80 });
+    const relevantPrecious = selectRelevantPrecious(precious, shaped.lexicalTokens);
+    const [recall, quotes] = await Promise.all([
+      runRecall(env, {
+        namespace,
+        query,
+        recent,
+        k: 12,
+        core_fingerprint: buildCoreFingerprint(relevantPrecious.map(p => p.content)),
+        skip_inject_mark: true,
+        attach_week_blocks: temporal,
+        waitUntil: promise => ctx.waitUntil(promise.catch(() => console.error("gateway recall accounting failed")))
+      }),
+      searchQuotes(env.DB, {
+        namespace,
+        query,
+        tokens: shaped.lexicalTokens,
+        limit: evidence ? 4 : 2,
+        excludeIds: options.excludeMessageIds
+      })
+    ]);
 
-  const weekBlocks = temporal
-    ? recall.week_blocks.filter((block) =>
-      isPreciousRelevant(`${block.week} ${block.title} ${block.summary}`, shaped.lexicalTokens)
-    )
-    : [];
+    const weekBlocks = temporal
+      ? recall.week_blocks.filter((block) =>
+        isPreciousRelevant(`${block.week} ${block.title} ${block.summary}`, shaped.lexicalTokens)
+      )
+      : [];
 
-  const quoteEntries = quotes.map((hit) => ({
-    kind: "quote",
-    content: formatQuote(hit),
-    id: hit.id,
-    excerpt: hit.excerpt
+    const quoteEntries = quotes.map((hit) => ({
+      kind: "quote",
+      content: formatQuote(hit),
+      id: hit.id,
+      excerpt: hit.excerpt
+    }));
+    const droppedAsQuoteDup = recall.hits.filter((hit) =>
+      quotes.some((quote) => quoteOverlaps(hit.content, quote.excerpt || quote.content))
+    );
+    const regularHits = recall.hits.filter((hit) => !droppedAsQuoteDup.some((dup) => dup.id === hit.id));
+    const droppedPrecious = precious
+      .filter((row) => !relevantPrecious.some((kept) => kept.id === row.id))
+      .slice(0, 12);
+    const entries: SurfaceEntry[] = [
+      ...(evidence ? quoteEntries : []),
+      ...relevantPrecious.map(p => ({ kind: "precious", content: p.content, id: p.id })),
+      ...recall.glossary_hits.map(p => ({ kind: "glossary", content: `${p.term}: ${p.definition}` })),
+      ...regularHits.map(p => ({ kind: memoryKind(p.source, p.type, p.authored_by), content: p.content, id: p.id })),
+      ...(!evidence ? quoteEntries : []),
+      ...weekBlocks.map(p => ({ kind: "impression", content: `${IMPRESSION_DISCLAIMER} ${p.week}: ${p.summary}` }))
+    ].map(entry => ({ ...entry, namespace }));
+    return { namespace, entries, relevantPrecious, quotes, regularHits, weekBlocks, droppedAsQuoteDup, droppedPrecious };
   }));
-  const droppedAsQuoteDup = recall.hits.filter((hit) =>
-    quotes.some((quote) => quoteOverlaps(hit.content, quote.excerpt || quote.content))
-  );
-  const regularHits = recall.hits.filter((hit) => !droppedAsQuoteDup.some((dup) => dup.id === hit.id));
-  const droppedPrecious = precious
-    .filter((row) => !relevantPrecious.some((kept) => kept.id === row.id))
-    .slice(0, 12);
-  const assembled = assembleRecallSurface([
-    ...(evidence ? quoteEntries : []),
-    ...relevantPrecious.map(p => ({ kind: "precious", content: p.content, id: p.id })),
-    ...recall.glossary_hits.map(p => ({ kind: "glossary", content: `${p.term}: ${p.definition}` })),
-    ...regularHits.map(p => ({ kind: memoryKind(p.source, p.type, p.authored_by), content: p.content, id: p.id })),
-    ...(!evidence ? quoteEntries : []),
-    ...weekBlocks.map(p => ({ kind: "impression", content: `${IMPRESSION_DISCLAIMER} ${p.week}: ${p.summary}` }))
-  ], {
+  const available = spaces.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+  const failedNamespaces = namespaces.filter((_, i) => spaces[i].status === "rejected");
+  if (!available.length) throw new Error("All configured recall spaces are unavailable");
+  // Interleave spaces before applying ONE shared budget, so adding spaces cannot
+  // multiply the prompt budget or let the first space consume every slot.
+  const entries: SurfaceEntry[] = [];
+  const seen = new Set<string>();
+  const ordinary = new Set(["precious", "glossary", "quote", "impression"]);
+  const categories = evidence ? ["quote", "precious", "glossary", "regular", "impression"]
+    : ["precious", "glossary", "regular", "quote", "impression"];
+  for (const kind of categories) {
+    const lists = available.map(space => space.entries.filter(entry => kind === "regular" ? !ordinary.has(entry.kind) : entry.kind === kind));
+    for (let i = 0; i < Math.max(...lists.map(list => list.length)); i++) {
+      for (const list of lists) {
+        const entry = list[i];
+        if (!entry) continue;
+        const key = `${entry.kind}\n${entry.content.trim()}`;
+        if (!seen.has(key)) { seen.add(key); entries.push(entry); }
+      }
+    }
+  }
+  const assembled = assembleRecallSurface(entries, {
     budget: identity.maxMemoryChars || 6000,
     maxItems: budget.maxItems,
     maxChars: budget.maxChars
   });
 
-  const injectedMemoryIds = assembled.entries
-    .filter((entry) => entry.id && entry.kind !== "precious" && entry.kind !== "glossary" && entry.kind !== "week" && entry.kind !== "quote" && entry.kind !== "impression")
-    .map((entry) => entry.id!);
-  if (injectedMemoryIds.length > 0) {
-    ctx.waitUntil(
-      markMemoriesInjected(env.DB, { namespace, ids: injectedMemoryIds })
-        .catch(() => console.error("gateway recall accounting failed"))
-    );
+  for (const namespace of namespaces) {
+    const injectedMemoryIds = assembled.entries
+      .filter(entry => entry.namespace === namespace)
+      .filter((entry) => entry.id && entry.kind !== "precious" && entry.kind !== "glossary" && entry.kind !== "week" && entry.kind !== "quote" && entry.kind !== "impression")
+      .map((entry) => entry.id!);
+    if (injectedMemoryIds.length > 0) {
+      ctx.waitUntil(
+        markMemoriesInjected(env.DB, { namespace, ids: injectedMemoryIds })
+          .catch(() => console.error("gateway recall accounting failed"))
+      );
+    }
   }
 
   const explain = {
     recall_id: recallId,
     identity: identity.slug,
+    write_namespace: namespace,
+    read_namespaces: namespaces,
+    failed_namespaces: failedNamespaces,
     query: query.slice(0, 80),
     tokens: shaped.lexicalTokens.slice(0, 12),
     thin: shaped.thin,
     evidence,
     channels: {
-      precious_selected: relevantPrecious.length,
-      quotes: quotes.length,
-      regular_hits: regularHits.length,
-      week_blocks: weekBlocks.length,
-      dropped_as_quote_dup: droppedAsQuoteDup.length
+      precious_selected: available.reduce((n, s) => n + s.relevantPrecious.length, 0),
+      quotes: available.reduce((n, s) => n + s.quotes.length, 0),
+      regular_hits: available.reduce((n, s) => n + s.regularHits.length, 0),
+      week_blocks: available.reduce((n, s) => n + s.weekBlocks.length, 0),
+      dropped_as_quote_dup: available.reduce((n, s) => n + s.droppedAsQuoteDup.length, 0)
     },
     items: assembled.entries.map((entry) => ({
       id: entry.id ?? null,
+      namespace: entry.namespace,
       kind: entry.kind,
       reason: entry.kind === "quote"
         ? "quote_excerpt"
@@ -134,8 +169,8 @@ export async function recallPatch(
             : "recall_hit"
     })),
     excluded: [
-      ...droppedAsQuoteDup.map((hit) => ({ id: hit.id, reason: "quote_dup_on_excerpt" })),
-      ...droppedPrecious.map((row) => ({ id: row.id, reason: "precious_not_relevant" }))
+      ...available.flatMap(s => s.droppedAsQuoteDup.map(hit => ({ id: hit.id, namespace: s.namespace, reason: "quote_dup_on_excerpt" }))),
+      ...available.flatMap(s => s.droppedPrecious.map(row => ({ id: row.id, namespace: s.namespace, reason: "precious_not_relevant" })))
     ].slice(0, 24),
     injected: assembled.entries.length,
     kinds: assembled.entries.map((entry) => entry.kind),
@@ -174,11 +209,17 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
     return gatewayError(protocol, "Request-only memory requires stateless Responses input: send full history without previous_response_id, conversation or item_reference; or use a model outside the main list.", 400);
   }
   const turn = classifyTurn(body, protocol, request.headers.get("x-aelios-purpose") === "auxiliary");
+  let prepared: ReturnType<typeof prepareGatewayRequest>;
+  try { prepared = prepareGatewayRequest(env, config, identity, protocol, request, body); }
+  catch (error) {
+    return gatewayError(protocol, error instanceof Error ? error.message : "Invalid upstream request",
+      error instanceof RequestContractError || error instanceof UpstreamRouteError ? 400 : 502);
+  }
+  if (prepared.removed.length) console.log("gateway request normalized", { protocol, removed: prepared.removed });
   let patch = "";
   let memoryStatus = !main ? "off" : turn.kind !== "human" ? "skipped" : "empty";
   let rememberStatus = "none";
   const recallId = newId("rcl");
-  sanitizeCacheControl(body, protocol);
   const exchange = main ? await prepareExchange(request, body, identity, protocol, turn, auth.profile.source) : null;
   if (exchange && main && turn.kind === "human" && turn.text) {
     try {
@@ -189,7 +230,9 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       console.error("gateway human utterance persist failed", { identity: identity.slug, error });
     }
   }
-  if (main && turn.kind === "human" && turn.text) {
+  const thinkingCompatible = memoryThinkingCompatible(prepared.body, protocol, prepared.headers);
+  if (main && turn.kind === "human" && !thinkingCompatible) memoryStatus = "skipped-thinking";
+  if (main && turn.kind === "human" && turn.text && thinkingCompatible) {
     try {
       const prior = recentHumanTexts(body, protocol).slice(0, -1).slice(-3);
       patch = await recallPatch(env, identity, turn.text, ctx, prior, {
@@ -203,13 +246,14 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       console.error("gateway recall unavailable", { identity: identity.slug, error });
     }
   }
-  const payload = appendMemory(body, protocol, patch);
+  const payload = appendMemory(prepared.body, protocol, patch);
   if (protocol === "responses" && main) payload.store = false;
   try {
-    const upstream = await callGatewayUpstream(env, config, identity, protocol, request, payload);
+    const upstream = await callGatewayUpstream(protocol, request, prepared, payload);
     const headers = new Headers(upstream.headers);
     headers.set("x-aelios-identity", identity.slug);
     headers.set("x-aelios-memory", memoryStatus);
+    headers.set("x-aelios-normalized", String(prepared.removed.length));
     headers.set("x-aelios-recall-id", recallId);
     headers.set("x-aelios-remember", rememberStatus);
     headers.set("x-aelios-provider", upstream.headers.get("cf-aig-provider") || "");
@@ -241,6 +285,6 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       ctx.waitUntil(dispatchExchange(env, exchange).catch(() => console.error("gateway exchange recording failed")));
     }
     return gatewayError(protocol, `Upstream request failed: ${error instanceof Error ? error.message : String(error)}`,
-      error instanceof UpstreamRouteError ? error.status : 502);
+      error instanceof UpstreamRouteError || error instanceof RequestContractError ? error.status : 502);
   }
 }

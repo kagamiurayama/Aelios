@@ -986,7 +986,9 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
                 <button type="button" @click="gwIdentities.splice(i, 1)" class="tap shrink-0 rounded-xl border border-zinc-800 px-3 py-2 text-xs text-zinc-500 transition hover:border-coral hover:text-zinc-100">移除</button>
               </div>
               <input x-model="idn.modelsText" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="主模型,逗号分隔,如 anthropic/claude-opus-5, *fable*">
-              <input x-model="idn.namespace" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="记忆空间,留空与名字同名">
+              <input x-model="idn.namespace" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="写入空间,留空与名字同名">
+              <input x-model="idn.readNamespacesText" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="召回空间,逗号分隔;留空只读写入空间;[] 不召回">
+              <p class="text-[11px] text-zinc-500">最多 8 个召回空间，共用注入预算。共享时填同一空间；迁移时写新空间、召回保留旧空间。</p>
               <div class="flex flex-wrap gap-x-4 gap-y-2 pt-1">
                 <template x-for="k in gwKeyOptions" :key="k.id">
                   <label class="flex items-center gap-1.5 text-xs text-zinc-400"><input type="checkbox" :value="k.id" x-model="idn.keys" class="h-4 w-4 accent-[#f4a07c]"><span x-text="k.label"></span></label>
@@ -997,7 +999,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
                 <label class="mt-2 block text-xs text-zinc-400">Claude 思考块</label>
                 <select x-model="idn.anthropicThinking" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral">
                   <option value="passthrough">原样透传(思考开着时跳过注入)</option>
-                  <option value="drop_block">丢掉思考块,正常注入</option>
+                  <option value="drop_block">临时记忆 + 上游丢弃失配思考(需 beta)</option>
                 </select>
                 <label class="mt-2 block text-xs text-zinc-400">单次记忆字数上限</label>
                 <input x-model="idn.maxMemoryChars" type="number" min="256" max="24000" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="留空默认 6000">
@@ -1207,6 +1209,7 @@ function memoryAdmin() {
             slug: idn.slug || '',
             modelsText: (idn.models || []).join(', '),
             namespace: idn.namespace || '',
+            readNamespacesText: idn.readNamespaces ? (idn.readNamespaces.length ? idn.readNamespaces.join(', ') : '[]') : '',
             keys: idn.keys && idn.keys.length ? idn.keys.slice() : ['CHATBOX_API_KEY'],
             anthropicThinking: idn.anthropicThinking || 'passthrough',
             maxMemoryChars: idn.maxMemoryChars || ''
@@ -1220,7 +1223,7 @@ function memoryAdmin() {
       this.gwBusy = false;
     },
     gwAdd() {
-      this.gwIdentities.push({ slug: '', modelsText: '', namespace: '', keys: ['CHATBOX_API_KEY'], anthropicThinking: 'passthrough', maxMemoryChars: '' });
+      this.gwIdentities.push({ slug: '', modelsText: '', namespace: '', readNamespacesText: '', keys: ['CHATBOX_API_KEY'], anthropicThinking: 'passthrough', maxMemoryChars: '' });
     },
     async gwSave() {
       if (this.gwBusy) return;
@@ -1233,6 +1236,8 @@ function memoryAdmin() {
             models: (idn.modelsText || '').split(/[,，\n]/).map(function(s) { return s.trim(); }).filter(Boolean)
           };
           if ((idn.namespace || '').trim()) out.namespace = idn.namespace.trim();
+          const reads = (idn.readNamespacesText || '').trim();
+          if (reads) out.readNamespaces = reads === '[]' ? [] : reads.split(/[,，\n]/).map(function(s) { return s.trim(); }).filter(Boolean);
           if (idn.anthropicThinking && idn.anthropicThinking !== 'passthrough') out.anthropicThinking = idn.anthropicThinking;
           const budget = parseInt(idn.maxMemoryChars, 10);
           if (budget) out.maxMemoryChars = budget;

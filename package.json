@@ -11,7 +11,7 @@
     "deploy:cloudflare": "npm run deploy",
     "deploy:bare": "wrangler deploy --keep-vars",
     "typecheck": "tsc --noEmit",
-    "test:gateway": "node --import tsx --test tests/gateway.test.ts",
+    "test:gateway": "node --import tsx --test tests/gateway.test.ts tests/request-contract.test.ts",
     "test:recall": "node --import tsx --test tests/recall-quality.test.ts",
     "test:diary": "node --import tsx --test tests/diary-grounding.test.ts",
     "verify": "npm run typecheck && npm run test:gateway && npm run test:recall && npm run test:diary && node scripts/verify-assembler.mjs && node scripts/verify-vector-memory-write.mjs && node --import tsx scripts/verify-dedup-gate.mjs && node --import tsx scripts/verify-sanitize.mjs && node --import tsx scripts/verify-week-blocks.mjs",
