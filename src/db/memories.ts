@@ -1,5 +1,5 @@
 import type { MemoryLifecycleRow, MemoryRecord } from "../types";
-import { searchFtsIds } from "../memory/fts";
+import { deleteFtsRow, searchFtsIds, upsertMemoryFts } from "../memory/fts";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 
@@ -97,6 +97,7 @@ export async function createMemory(db: D1Database, input: CreateMemoryInput): Pr
     )
     .run();
 
+  await upsertMemoryFts(db, { namespace: record.namespace, memoryId: record.id, content: record.content });
   return record;
 }
 
@@ -300,7 +301,20 @@ export async function updateMemory(
     .bind(...binds, input.namespace, input.id)
     .run();
 
-  return getMemoryById(db, input);
+  const updated = await getMemoryById(db, input);
+  if (updated) {
+    const inactive = updated.status === "deleted" || updated.status === "archived" || updated.status === "expired";
+    if (inactive) {
+      await deleteFtsRow(db, "memory_fts", "memory_id", updated.id);
+    } else if (input.patch.content !== undefined || input.patch.summary !== undefined) {
+      await upsertMemoryFts(db, {
+        namespace: updated.namespace,
+        memoryId: updated.id,
+        content: `${updated.content}\n${updated.summary ?? ""}`
+      });
+    }
+  }
+  return updated;
 }
 
 export async function softDeleteMemory(
@@ -357,27 +371,34 @@ export async function searchMemoriesByText(
   }
   const binds: unknown[] = [input.namespace];
 
-  const clauses: string[] = [];
+  const likeClauses: string[] = [];
+  const likeBinds: unknown[] = [];
   if (query.length >= 2) {
     const like = `%${escapeLike(query)}%`;
-    clauses.push("(content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR type LIKE ? ESCAPE '\\')");
-    binds.push(like, like, like, like);
+    likeClauses.push("(content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR type LIKE ? ESCAPE '\\')");
+    likeBinds.push(like, like, like, like);
   }
   for (const token of tokens) {
     const like = `%${escapeLike(token)}%`;
-    clauses.push("(content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')");
-    binds.push(like, like);
+    likeClauses.push("(content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')");
+    likeBinds.push(like, like);
   }
   const ftsIds = tokens.length > 0
     ? await searchFtsIds(db, "memory_fts", "memory_id", { namespace: input.namespace, tokens, limit: input.limit })
     : [];
+  // SQL placeholders and bind values must stay in the same order.
+  // Previous code put `id IN (...)` first in SQL but appended IDs after LIKE binds.
   if (ftsIds.length > 0) {
     sql += ` AND (id IN (${ftsIds.map(() => "?").join(", ")})`;
     binds.push(...ftsIds);
-    if (clauses.length > 0) sql += ` OR (${clauses.join(" OR ")})`;
+    if (likeClauses.length > 0) {
+      sql += ` OR (${likeClauses.join(" OR ")})`;
+      binds.push(...likeBinds);
+    }
     sql += ")";
-  } else if (clauses.length > 0) {
-    sql += ` AND (${clauses.join(" OR ")})`;
+  } else if (likeClauses.length > 0) {
+    sql += ` AND (${likeClauses.join(" OR ")})`;
+    binds.push(...likeBinds);
   }
 
   if (input.types && input.types.length > 0) {

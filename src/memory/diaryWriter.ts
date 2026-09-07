@@ -95,13 +95,13 @@ async function listMessagesTailInRange(
 ): Promise<MessageRecord[]> {
   const result = await db
     .prepare(
-      `SELECT id, conversation_id, namespace, role, content, source, created_at
+      `SELECT id, conversation_id, namespace, role, content, source, created_at, seq
        FROM messages
        WHERE namespace = ?
          AND role IN ('user', 'assistant')
          AND created_at >= ?
          AND created_at < ?
-       ORDER BY created_at DESC, id DESC
+       ORDER BY created_at DESC, seq DESC, CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END DESC, id DESC
        LIMIT ?`
     )
     .bind(input.namespace, input.startCreatedAt, input.endCreatedAt, input.limit)

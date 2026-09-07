@@ -58,14 +58,14 @@ export async function persistExchange(env: Env, e: GatewayExchange): Promise<voi
   if (e.kind !== "auxiliary") {
     statements.push(env.DB.prepare(`INSERT OR IGNORE INTO conversations (id, namespace, created_at, updated_at) VALUES (?, ?, ?, ?)`)
       .bind(e.conversationId, e.namespace, e.createdAt, e.createdAt));
-    const addMessage = (id: string, role: string, content: string) => statements.push(env.DB.prepare(`INSERT OR IGNORE INTO messages
+    const addMessage = (id: string, role: string, content: string, seq: number) => statements.push(env.DB.prepare(`INSERT OR IGNORE INTO messages
       (id, conversation_id, namespace, role, content, source, client_message_hash, upstream_model,
-       upstream_provider, request_model, stream, finish_reason, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       upstream_provider, request_model, stream, finish_reason, created_at, seq)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(id, e.conversationId, e.namespace, role, content, "gateway:" + e.profile, id,
-        e.model, e.provider, e.profile, e.stream ? 1 : 0, e.completion, e.createdAt));
-    if (e.kind === "human" && e.userText && e.completion !== "truncated") addMessage(e.userId, "user", e.userText);
-    if (e.completion === "complete" && e.assistantText) addMessage(e.id + ":assistant", "assistant", e.assistantText);
+        e.model, e.provider, e.profile, e.stream ? 1 : 0, e.completion, e.createdAt, seq));
+    if (e.kind === "human" && e.userText && e.completion !== "truncated") addMessage(e.userId, "user", e.userText, 0);
+    if (e.completion === "complete" && e.assistantText) addMessage(e.id + ":assistant", "assistant", e.assistantText, 1);
   }
   await env.DB.batch(statements);
   if (e.kind !== "auxiliary") {
@@ -112,10 +112,10 @@ export async function persistHumanUtterance(
       .bind(e.conversationId, e.namespace, e.createdAt, e.createdAt),
     env.DB.prepare(`INSERT OR IGNORE INTO messages
       (id, conversation_id, namespace, role, content, source, client_message_hash, upstream_model,
-       upstream_provider, request_model, stream, finish_reason, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       upstream_provider, request_model, stream, finish_reason, created_at, seq)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(e.userId, e.conversationId, e.namespace, "user", e.userText, "gateway:" + e.profile, e.userId,
-        e.model, e.provider, e.profile, e.stream ? 1 : 0, e.completion, e.createdAt)
+        e.model, e.provider, e.profile, e.stream ? 1 : 0, e.completion, e.createdAt, 0)
   ]);
   const indexed = await upsertMessageFts(env.DB, {
     namespace: e.namespace,

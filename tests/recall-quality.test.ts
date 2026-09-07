@@ -13,11 +13,23 @@ import { assembleRecallSurface, formatRecallSurface } from "../src/memory/surfac
 import { filterAndCompressMemoriesWithMeta } from "../src/memory/filter";
 import { formatDreamCursor, readDailyCursor } from "../src/memory/dreamDates";
 import { listMessagesByNamespaceInRange } from "../src/db/messages";
-import { parseRememberNow } from "../src/memory/rememberNow";
-import { formatQuote, searchQuotes } from "../src/memory/quotes";
+import {
+  classifyRememberUtterance,
+  parseRememberNow
+} from "../src/memory/rememberNow";
+import { excerptAroundMatch, formatQuote, quoteOverlaps, searchQuotes } from "../src/memory/quotes";
 import { isEvidenceQuery, isTemporalQuery, tokenizeForIndex } from "../src/memory/queryShape";
 import { searchMemoriesByText } from "../src/db/memories";
+import { backfillFts, rebuildFts, toFtsBody } from "../src/memory/fts";
+import {
+  decideJudge,
+  parseJudgeBoolean,
+  parseJudgeModelResult,
+  judgeKindFor,
+  buildJudgePrompt
+} from "../src/memory/candidateJudge";
 import { recentHumanTexts } from "../src/gateway/protocol";
+import type { MemoryCandidateRow } from "../src/db/v2/candidates";
 
 test("topical questions do not mix the previous turn into lexical tokens", () => {
   const shaped = shapeRecallQuery({
@@ -194,11 +206,11 @@ test("same-timestamp messages are not skipped after a mid-batch cut", async () =
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(`CREATE TABLE messages (
     id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
-    source TEXT, created_at TEXT
+    source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
   )`);
   const ts = "2026-09-06T12:00:00.000Z";
-  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)").run("msg_a", "c", "ns", "user", "先说", "gw", ts);
-  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)").run("msg_b", "c", "ns", "assistant", "后说", "gw", ts);
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("msg_a", "c", "ns", "user", "先说", "gw", ts, 0);
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("msg_b", "c", "ns", "assistant", "后说", "gw", ts, 1);
   const db = {
     prepare(sql: string) {
       const statement = sqlite.prepare(sql);
@@ -255,10 +267,10 @@ test("raw utterances are searchable before they become facts", async () => {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(`CREATE TABLE messages (
     id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
-    source TEXT, created_at TEXT
+    source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
   )`);
-  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-    "msg_1", "c", "ns", "user", "请记住调试暗号是芝麻开门", "gw", "2026-09-06T12:00:00.000Z"
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "msg_1", "c", "ns", "user", "请记住调试暗号是芝麻开门", "gw", "2026-09-06T12:00:00.000Z", 0
   );
   const db = {
     prepare(sql: string) {
@@ -284,6 +296,15 @@ test("remember-now extracts the original words after the trigger", () => {
   assert.equal(parseRememberNow("帮我记一下：喜欢 Cloudflare"), "喜欢 Cloudflare");
   assert.equal(parseRememberNow("remember that the passphrase is sesame"), "the passphrase is sesame");
   assert.equal(parseRememberNow("我们喜欢什么？"), null);
+  assert.equal(parseRememberNow("记住了吗？"), null);
+  assert.equal(parseRememberNow("remember when we talked about the project?"), null);
+  assert.equal(
+    parseRememberNow("请记住：暗号是芝麻开门。只回复三个字：记住了"),
+    "暗号是芝麻开门"
+  );
+  assert.equal(classifyRememberUtterance("记住了吗？")?.kind, "probe");
+  assert.equal(classifyRememberUtterance("remember when we talked about the project?")?.kind, "recollect");
+  assert.equal(classifyRememberUtterance("请记住调试暗号是芝麻开门")?.kind, "save");
 });
 
 test("recentHumanTexts walks user turns in chronological order", () => {
@@ -296,4 +317,214 @@ test("recentHumanTexts walks user turns in chronological order", () => {
     ]
   }, "chat");
   assert.deepEqual(texts, ["先做网关", "那个呢？"]);
+});
+
+function wrapSqlite(sqlite: DatabaseSync) {
+  return {
+    prepare(sql: string) {
+      const statement = sqlite.prepare(sql);
+      let args: unknown[] = [];
+      const api = {
+        bind(...values: unknown[]) { args = values; return api; },
+        async all() { return { results: statement.all(...args) }; },
+        async first() { return statement.get(...args) || null; },
+        async run() { return { meta: { changes: statement.run(...args).changes } }; }
+      };
+      return api;
+    }
+  };
+}
+
+function memoriesSchema(sqlite: DatabaseSync): void {
+  sqlite.exec(`CREATE TABLE memories (
+    id TEXT PRIMARY KEY, namespace TEXT, type TEXT, content TEXT, summary TEXT,
+    importance REAL, confidence REAL, status TEXT, pinned INTEGER, tags TEXT,
+    source TEXT, source_message_ids TEXT, vector_id TEXT, last_recalled_at TEXT,
+    recall_count INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT, expires_at TEXT,
+    version_status TEXT, fact_key TEXT, superseded_by TEXT, authored_by TEXT, response_tendency TEXT
+  )`);
+}
+
+test("judge does not archive a still-valid fact and rejects string booleans", () => {
+  const thresholds = { approveMin: 0.8, discardMax: 0.3 };
+  assert.equal(judgeKindFor("dream_delete"), "delete");
+  assert.equal(judgeKindFor("dream_update"), "update");
+  assert.equal(judgeKindFor("dream_add"), "add");
+  assert.equal(parseJudgeBoolean("false"), false);
+  assert.equal(parseJudgeBoolean("true"), true);
+  assert.equal(parseJudgeBoolean(false), false);
+  assert.equal(parseJudgeBoolean("maybe"), null);
+  assert.equal(parseJudgeModelResult({
+    score: 0.95,
+    grounded: "false",
+    durable: true,
+    reason: "string false must not coerce to true"
+  })?.grounded, false);
+  assert.equal(parseJudgeModelResult({ score: 0.9, grounded: "nope", durable: true }), null);
+
+  const goodFact = {
+    score: 0.94,
+    grounded: true,
+    durable: true,
+    shouldDelete: null,
+    reason: "对话里用户明确说过这件事，且是长期稳定的事实。"
+  };
+  assert.equal(decideJudge("delete", goodFact, thresholds), "discard");
+  assert.equal(decideJudge("add", goodFact, thresholds), "approve");
+  assert.equal(decideJudge("delete", { ...goodFact, shouldDelete: false, score: 0.99 }, thresholds), "discard");
+  assert.equal(decideJudge("delete", {
+    score: 0.91,
+    grounded: false,
+    durable: false,
+    shouldDelete: true,
+    reason: "已被用户否定，应该归档。"
+  }, thresholds), "approve");
+
+  const deletePrompt = buildJudgePrompt({
+    id: "cand_1",
+    namespace: "ns",
+    type: "fact",
+    content: "调试暗号是芝麻开门",
+    fact_key: "fact:pass",
+    confidence: 0.9,
+    importance: 0.9,
+    tags: "[]",
+    source_message_ids: "[]",
+    source: "dream_delete",
+    status: "pending",
+    target_memory_id: "mem_1",
+    decision_note: null,
+    created_at: "2026-09-06",
+    updated_at: "2026-09-06"
+  } as MemoryCandidateRow, []);
+  assert.match(deletePrompt, /归档提案|应不应该删/);
+  assert.doesNotMatch(deletePrompt, /score 高 = 值得新增/);
+});
+
+test("FTS id hits keep SQL binds aligned and still find the rows", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  memoriesSchema(sqlite);
+  sqlite.prepare(`INSERT INTO memories (
+    id, namespace, type, content, summary, importance, confidence, status, pinned, tags,
+    source, source_message_ids, vector_id, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    "mem_a", "ns", "note", "调试暗号是芝麻开门", null, 0.8, 0.8, "active", 0, "[]",
+    "extract", "[]", "v", "2026-09-01", "2026-09-01"
+  );
+  sqlite.prepare(`INSERT INTO memories (
+    id, namespace, type, content, summary, importance, confidence, status, pinned, tags,
+    source, source_message_ids, vector_id, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    "mem_b", "ns", "note", "备用暗号是芝麻开门", null, 0.8, 0.8, "active", 0, "[]",
+    "extract", "[]", "v", "2026-09-01", "2026-09-01"
+  );
+
+  const real = wrapSqlite(sqlite);
+  const db = {
+    prepare(sql: string) {
+      if (sql.includes("memory_fts") && sql.includes("MATCH")) {
+        const api = {
+          bind() { return api; },
+          async all() { return { results: [{ id: "mem_a" }, { id: "mem_b" }] }; }
+        };
+        return api;
+      }
+      return real.prepare(sql);
+    }
+  };
+
+  const hits = await searchMemoriesByText(db as any, {
+    namespace: "ns",
+    query: "我们喜欢什么？",
+    tokens: ["暗号", "芝麻"],
+    limit: 10
+  });
+  assert.equal(hits.length, 2);
+  assert.ok(hits.some((row) => row.id === "mem_a"));
+  assert.ok(hits.some((row) => row.id === "mem_b"));
+  sqlite.close();
+});
+
+test("same-timestamp gateway hashes keep ask-then-answer order", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
+    source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
+  )`);
+  const ts = "2026-09-06T12:00:00.000Z";
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "gw_req_ffff", "c", "ns", "assistant", "芝麻开门", "gw", ts, 1
+  );
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "gw_user_aaaa", "c", "ns", "user", "调试暗号是什么？", "gw", ts, 0
+  );
+  const rows = await listMessagesByNamespaceInRange(wrapSqlite(sqlite) as any, {
+    namespace: "ns",
+    startCreatedAt: "2026-09-06T00:00:00.000Z",
+    endCreatedAt: "2026-09-07T00:00:00.000Z",
+    limit: 10
+  });
+  assert.deepEqual(rows.map((row) => row.role), ["user", "assistant"]);
+  assert.deepEqual(rows.map((row) => row.id), ["gw_user_aaaa", "gw_req_ffff"]);
+  sqlite.close();
+});
+
+test("quote excerpts keep the matched span and final-snippet dedup uses the excerpt", () => {
+  const prefix = "前言".repeat(80);
+  const content = `${prefix} 调试暗号是芝麻开门 ${"结尾".repeat(20)}`;
+  const excerpt = excerptAroundMatch(content, ["芝麻开门", "暗号"]);
+  assert.match(excerpt, /芝麻开门/);
+  assert.ok(excerpt.length <= 282);
+  const formatted = formatQuote({
+    id: "msg_long",
+    role: "user",
+    content,
+    excerpt,
+    created_at: "2026-09-06T12:00:00.000Z",
+    conversation_id: "c",
+    score: 1
+  });
+  assert.match(formatted, /芝麻开门/);
+  assert.ok(quoteOverlaps("调试暗号是芝麻开门", excerpt));
+  assert.equal(quoteOverlaps("完全无关的普通记忆", excerpt.slice(0, 12)), false);
+});
+
+test("FTS backfill indexes missing rows and can rebuild from source text", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
+    source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
+  )`);
+  memoriesSchema(sqlite);
+  sqlite.exec(`CREATE TABLE message_fts (fts_body TEXT, namespace TEXT, message_id TEXT)`);
+  sqlite.exec(`CREATE TABLE memory_fts (fts_body TEXT, namespace TEXT, memory_id TEXT)`);
+  const long = `${"前面铺垫。".repeat(40)}最后才出现月亮邮局暗号。`;
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "msg_tail", "c", "ns", "user", long, "gw", "2026-09-06T12:00:00.000Z", 0
+  );
+  sqlite.prepare(`INSERT INTO memories (
+    id, namespace, type, content, summary, importance, confidence, status, pinned, tags,
+    source, source_message_ids, vector_id, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    "mem_tail", "ns", "note", long, null, 0.8, 0.8, "active", 0, "[]",
+    "extract", "[]", "v", "2026-09-01", "2026-09-01"
+  );
+
+  const db = wrapSqlite(sqlite);
+  const filled = await backfillFts(db as any, { namespace: "ns", limit: 50 });
+  assert.equal(filled.messagesIndexed, 1);
+  assert.equal(filled.memoriesIndexed, 1);
+  const messageBody = sqlite.prepare("SELECT fts_body FROM message_fts WHERE message_id = ?").get("msg_tail") as { fts_body: string };
+  const memoryBody = sqlite.prepare("SELECT fts_body FROM memory_fts WHERE memory_id = ?").get("mem_tail") as { fts_body: string };
+  assert.match(messageBody.fts_body, /暗号|邮局|月亮/);
+  assert.match(memoryBody.fts_body, /暗号|邮局|月亮/);
+  assert.match(toFtsBody(long), /暗号|邮局|月亮/);
+
+  sqlite.exec("DELETE FROM message_fts");
+  sqlite.exec("DELETE FROM memory_fts");
+  const rebuilt = await rebuildFts(db as any, { namespace: "ns", limit: 50 });
+  assert.equal(rebuilt.messagesIndexed, 1);
+  assert.equal(rebuilt.memoriesIndexed, 1);
+  assert.equal(sqlite.prepare("SELECT count(*) AS n FROM message_fts").get()!.n, 1);
+  sqlite.close();
 });

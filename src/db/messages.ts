@@ -1,7 +1,20 @@
+import { upsertMessageFts } from "../memory/fts";
 import type { MessageRecord, OpenAIChatMessage, TokenUsage } from "../types";
 import { sha256Hex } from "../utils/hash";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
+
+export const MESSAGE_ORDER_SQL =
+  "created_at ASC, seq ASC, CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC, id ASC";
+
+export const MESSAGE_ORDER_SQL_DESC =
+  "created_at DESC, seq DESC, CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END DESC, id DESC";
+
+function roleSeq(role: string): number {
+  if (role === "user") return 0;
+  if (role === "assistant") return 1;
+  return 2;
+}
 
 function contentToText(content: OpenAIChatMessage["content"]): string {
   if (typeof content === "string") return content;
@@ -48,8 +61,8 @@ export async function saveUserMessages(
       .prepare(
         `INSERT OR IGNORE INTO messages (
           id, conversation_id, namespace, role, content, source, client_message_hash,
-          upstream_model, upstream_provider, request_model, stream, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          upstream_model, upstream_provider, request_model, stream, created_at, seq
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         id,
@@ -63,7 +76,8 @@ export async function saveUserMessages(
         input.upstreamProvider,
         input.requestModel,
         input.stream ? 1 : 0,
-        nowIso()
+        nowIso(),
+        roleSeq("user")
       )
       .run();
 
@@ -77,6 +91,7 @@ export async function saveUserMessages(
     } else {
       ids.push(id);
     }
+    await upsertMessageFts(db, { namespace: input.namespace, messageId: ids[ids.length - 1], content });
   }
 
   return ids;
@@ -108,8 +123,8 @@ export async function saveAssistantMessage(
         id, conversation_id, namespace, role, content, source, upstream_model,
         upstream_provider, request_model, stream, finish_reason, token_input,
         token_output, cache_mode, cache_ttl, cache_hit, cache_read_tokens,
-        cache_creation_tokens, raw_usage_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        cache_creation_tokens, raw_usage_json, created_at, seq
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -131,10 +146,12 @@ export async function saveAssistantMessage(
       usage.cache_read_input_tokens ?? null,
       usage.cache_creation_input_tokens ?? null,
       JSON.stringify(usage),
-      nowIso()
+      nowIso(),
+      roleSeq("assistant")
     )
     .run();
 
+  await upsertMessageFts(db, { namespace: input.namespace, messageId: id, content: input.content });
   return id;
 }
 
@@ -147,10 +164,10 @@ export async function getMessagesByIds(
   const placeholders = input.ids.map(() => "?").join(", ");
   const result = await db
     .prepare(
-      `SELECT id, conversation_id, namespace, role, content, source, created_at
+      `SELECT id, conversation_id, namespace, role, content, source, created_at, seq
        FROM messages
        WHERE namespace = ? AND id IN (${placeholders})
-       ORDER BY created_at ASC, id ASC`
+       ORDER BY ${MESSAGE_ORDER_SQL}`
     )
     .bind(input.namespace, ...input.ids)
     .all<MessageRecord>();
@@ -190,7 +207,7 @@ export async function listMessagesByNamespace(
   afterCreatedAt: string | null,
   limit: number
 ): Promise<MessageRecord[]> {
-  let sql = `SELECT id, conversation_id, namespace, role, content, source, created_at
+  let sql = `SELECT id, conversation_id, namespace, role, content, source, created_at, seq
              FROM messages
              WHERE namespace = ? AND role IN ('user', 'assistant')`;
   const binds: unknown[] = [namespace];
@@ -200,7 +217,7 @@ export async function listMessagesByNamespace(
     binds.push(afterCreatedAt);
   }
 
-  sql += ` ORDER BY created_at ASC, id ASC LIMIT ?`;
+  sql += ` ORDER BY ${MESSAGE_ORDER_SQL} LIMIT ?`;
   binds.push(limit);
 
   const result = await db.prepare(sql).bind(...binds).all<MessageRecord>();
@@ -215,8 +232,13 @@ function appendAfterCursor(
 ): string {
   if (!afterCreatedAt) return sql;
   if (afterId) {
-    binds.push(afterCreatedAt, afterCreatedAt, afterId);
-    return `${sql} AND (created_at > ? OR (created_at = ? AND id > ?))`;
+    // Look up seq from the cursor row so hash IDs never decide order.
+    binds.push(afterCreatedAt, afterCreatedAt, afterId, afterCreatedAt, afterId, afterId);
+    return `${sql} AND (
+      created_at > ?
+      OR (created_at = ? AND seq > COALESCE((SELECT seq FROM messages WHERE id = ?), 0))
+      OR (created_at = ? AND seq = COALESCE((SELECT seq FROM messages WHERE id = ?), 0) AND id > ?)
+    )`;
   }
   binds.push(afterCreatedAt);
   return `${sql} AND created_at > ?`;
@@ -233,7 +255,7 @@ export async function listMessagesByNamespaceInRange(
     limit: number;
   }
 ): Promise<MessageRecord[]> {
-  let sql = `SELECT id, conversation_id, namespace, role, content, source, created_at
+  let sql = `SELECT id, conversation_id, namespace, role, content, source, created_at, seq
              FROM messages
              WHERE namespace = ?
                AND role IN ('user', 'assistant')
@@ -241,7 +263,7 @@ export async function listMessagesByNamespaceInRange(
                AND created_at < ?`;
   const binds: unknown[] = [input.namespace, input.startCreatedAt, input.endCreatedAt];
   sql = appendAfterCursor(sql, binds, input.afterCreatedAt, input.afterId);
-  sql += ` ORDER BY created_at ASC, id ASC LIMIT ?`;
+  sql += ` ORDER BY ${MESSAGE_ORDER_SQL} LIMIT ?`;
   binds.push(input.limit);
 
   const result = await db.prepare(sql).bind(...binds).all<MessageRecord>();
@@ -258,6 +280,7 @@ export async function saveIngestMessages(
   }
 ): Promise<string[]> {
   const ids: string[] = [];
+  let seq = 0;
 
   for (const message of input.messages) {
     const content = contentToText(message.content);
@@ -269,8 +292,8 @@ export async function saveIngestMessages(
     await db
       .prepare(
         `INSERT INTO messages (
-          id, conversation_id, namespace, role, content, source, stream, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          id, conversation_id, namespace, role, content, source, stream, created_at, seq
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         id,
@@ -280,9 +303,12 @@ export async function saveIngestMessages(
         content,
         input.source,
         0,
-        nowIso()
+        nowIso(),
+        seq
       )
       .run();
+    await upsertMessageFts(db, { namespace: input.namespace, messageId: id, content });
+    seq += 1;
   }
 
   return ids;
