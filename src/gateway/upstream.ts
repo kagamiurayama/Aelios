@@ -1,0 +1,149 @@
+import type { Env } from "../types";
+import { isMainModel, PATHS, type GatewayConfig, type Identity, type Protocol } from "./config";
+import { applyThinkingPolicy, sanitizeCacheControl, type Body } from "./protocol";
+import { normalizeRequest, validateRequest } from "./request";
+
+const ACCOUNT_RE = /^[a-f0-9]{32}$/i;
+/** Second path segment that is a protocol leftover, not a Gateway ID. */
+const NOT_GATEWAY = /^(compat|v1|models|chat|messages|responses)$/i;
+const GATEWAY_HOST_RE =
+  /^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/([a-f0-9]{32})(?:\/([^/]+))?(?:\/(.*))?$/i;
+const REST_HOST_RE =
+  /^https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/([a-f0-9]{32})(?:\/.*)?$/i;
+
+export interface ResolvedUpstream {
+  accountId: string | null;
+  gatewayId: string;
+  /** CF: the gateway root. Custom OpenAI bases stay as typed. */
+  base: string;
+}
+
+function configuredAddress(env: Env, config: GatewayConfig): string {
+  return config.upstream?.address?.trim() || env.AI_GATEWAY_BASE_URL || env.CLOUDFLARE_ACCOUNT_ID || "";
+}
+
+/** The only CF catalog that actually lists models. Do not change this shape. */
+export function compatBase(accountId: string, gatewayId: string): string {
+  return `https://gateway.ai.cloudflare.com/v1/${accountId.toLowerCase()}/${gatewayId}/compat`;
+}
+
+/** Root of every BYOK-capable surface: compat, provider endpoints, catalog. */
+export function gatewayBase(accountId: string, gatewayId: string): string {
+  return `https://gateway.ai.cloudflare.com/v1/${accountId.toLowerCase()}/${gatewayId}`;
+}
+
+export function resolveGatewayId(env: Env, address = ""): string {
+  const fromUrl = stripAddress(address).match(GATEWAY_HOST_RE);
+  if (fromUrl?.[2] && !NOT_GATEWAY.test(fromUrl[2])) return fromUrl[2];
+  return env.AI_GATEWAY_ID?.trim() || "default";
+}
+
+function stripAddress(address: string): string {
+  return address.trim().replace(/\/+$/, "");
+}
+
+function parseGatewayHost(address: string): { accountId: string } | null {
+  const match = stripAddress(address).match(GATEWAY_HOST_RE);
+  return match ? { accountId: match[1] } : null;
+}
+
+export function resolveUpstream(env: Env, config: GatewayConfig): ResolvedUpstream {
+  const address = configuredAddress(env, config);
+  if (!address) throw new Error("Upstream not configured. Set the CF account in /admin/gateway.");
+  const trimmed = stripAddress(address);
+  const gatewayId = resolveGatewayId(env, trimmed);
+
+  if (ACCOUNT_RE.test(trimmed)) {
+    return { accountId: trimmed.toLowerCase(), gatewayId, base: gatewayBase(trimmed, gatewayId) };
+  }
+
+  const rest = trimmed.match(REST_HOST_RE);
+  if (rest) {
+    return { accountId: rest[1].toLowerCase(), gatewayId, base: gatewayBase(rest[1], gatewayId) };
+  }
+
+  const gw = parseGatewayHost(trimmed);
+  if (gw) {
+    return { accountId: gw.accountId.toLowerCase(), gatewayId, base: gatewayBase(gw.accountId, gatewayId) };
+  }
+
+  return { accountId: null, gatewayId, base: trimmed };
+}
+
+/** Do not change this shape: GET {compat}/models is the catalog CF actually serves. */
+export function catalogUrl(env: Env, config: GatewayConfig): string {
+  const resolved = resolveUpstream(env, config);
+  if (resolved.accountId) return `${compatBase(resolved.accountId, resolved.gatewayId)}/models`;
+  return `${resolved.base}/models`;
+}
+
+/** A route the caller can fix by changing protocol or model; not an upstream outage. */
+export class UpstreamRouteError extends Error {
+  readonly status = 400;
+}
+
+export interface UpstreamRoute {
+  url: string;
+  /** Provider endpoints take the native name; compat keeps the author-prefixed one. */
+  model: string;
+  /** Provider endpoints carry the CF token as cf-aig-authorization (BYOK); bearer elsewhere. */
+  auth: "bearer" | "cf-aig";
+}
+
+/**
+ * BYOK lives on the gateway surface; CF REST spends Unified credits only.
+ * chat → compat (every provider). messages / responses → the provider's native
+ * endpoint with its own path shape (`/v1/messages`; custom providers mount without
+ * the v1, and openai's responses drops it per CF docs).
+ */
+export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: string): UpstreamRoute {
+  if (!resolved.accountId) return { url: `${resolved.base}/${PATHS[protocol]}`, model, auth: "bearer" };
+  const gw = gatewayBase(resolved.accountId, resolved.gatewayId);
+  if (protocol === "chat") return { url: `${gw}/compat/chat/completions`, model, auth: "bearer" };
+  const slash = model.indexOf("/");
+  const provider = slash > 0 ? model.slice(0, slash).toLowerCase() : "";
+  const native = slash > 0 ? model.slice(slash + 1) : model;
+  if (!provider) throw new UpstreamRouteError(
+    `"${model}" has no provider prefix; use the author/model form so the BYOK endpoint is known.`);
+  const custom = provider.startsWith("custom-");
+  const path = protocol === "messages" ? (custom ? `/messages` : `/v1/messages`)
+    : provider === "openai" || custom ? `/responses` : `/v1/responses`;
+  return { url: `${gw}/${provider}${path}`, model: native, auth: "cf-aig" };
+}
+
+// One call, one upstream. Model names pass through as written (minus the provider
+// prefix on native endpoints); retries and fallback are AI Gateway's own job.
+export function prepareGatewayRequest(env: Env, config: GatewayConfig, identity: Identity,
+  protocol: Protocol, original: Request, body: Body) {
+  const token = env.CLOUDFLARE_API_TOKEN;
+  if (!token) throw new Error("Missing Worker secret CLOUDFLARE_API_TOKEN");
+  const route = routeFor(resolveUpstream(env, config), protocol, body.model);
+  const headers = new Headers({
+    "content-type": "application/json",
+    accept: body.stream ? "text/event-stream" : "application/json"
+  });
+  if (route.auth === "cf-aig") headers.set("cf-aig-authorization", `Bearer ${token}`);
+  else headers.set("authorization", `Bearer ${token}`);
+  for (const name of ["anthropic-version", "anthropic-beta", "openai-beta", "x-stainless-helper-method"]) {
+    const value = original.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  if (protocol === "messages" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
+  const normalized = normalizeRequest(body, protocol);
+  const out = normalized.body;
+  out.model = route.model;
+  if (isMainModel(identity, body.model)) applyThinkingPolicy(out, identity, protocol, headers);
+  validateRequest(out, protocol, headers);
+  sanitizeCacheControl(out, protocol);
+  validateRequest(out, protocol, headers);
+  return { route, headers, body: out, removed: normalized.removed };
+}
+export async function callGatewayUpstream(protocol: Protocol, original: Request,
+  prepared: ReturnType<typeof prepareGatewayRequest>, body: Body): Promise<Response> {
+  const { route, headers } = prepared;
+  // Check the actual wire payload, including the gateway's own modifications.
+  validateRequest(body, protocol, headers);
+  return fetch(route.url, {
+    method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"
+  });
+}

@@ -619,7 +619,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
         <div class="flex items-center justify-between gap-3">
           <div class="min-w-0 flex-1">
             <h1 class="text-2xl font-semibold">日记</h1>
-            <p class="mt-1 text-sm text-zinc-400">每日叙事日记与已卷起的周记。</p>
+            <p class="mt-1 text-sm text-zinc-400">每日叙事日记与已卷起的周记。日记是印象，具体事实请回溯正本。</p>
           </div>
           <button type="button" @click="loadDiary()" class="tap inline-flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900 px-4 text-sm transition duration-150 ease-in-out hover:border-coral">
             <i data-lucide="refresh-cw" class="h-4 w-4"></i><span>刷新</span>
@@ -663,6 +663,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
                 <span x-text="fmt(entry.updated_at)"></span>
               </div>
               <h3 class="text-base font-semibold text-zinc-100" x-text="entry.title"></h3>
+              <p class="mt-1 text-xs text-zinc-500" x-show="entry.source_message_ids && entry.source_message_ids.length" x-text="(entry.source_message_ids || []).length + ' 条原文可溯源'"></p>
               <p class="mt-2 whitespace-pre-wrap text-sm leading-7 text-zinc-300" :class="isDiaryExpanded('daily:' + entry.date) ? '' : 'line-clamp-4'" x-text="entry.summary"></p>
               <button type="button" @click="toggleDiaryExpand('daily:' + entry.date)" class="tap mt-2 text-xs text-coral transition duration-150 ease-in-out hover:underline" x-text="isDiaryExpanded('daily:' + entry.date) ? '收起' : '展开全文'"></button>
             </article>
@@ -939,7 +940,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
         </article>
       </section>
 
-      <section x-show="page === 'settings'" class="space-y-4 md:hidden">
+      <section x-show="page === 'settings'" class="space-y-4">
         <h1 class="text-2xl font-semibold">设置</h1>
         <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
           <button type="button" @click="toggleTheme()" class="tap mb-4 inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-4 text-sm text-zinc-100 transition duration-150 ease-in-out hover:border-coral">
@@ -961,6 +962,75 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
           <div class="mt-1 text-[11px]" :class="tokenSaved() ? 'text-zinc-500' : 'text-coral'" x-text="tokenSaved() ? 'Token 已保存到本机' : 'Token 尚未保存'"></div>
           <label class="mt-4 block text-xs text-zinc-400">Namespace</label>
           <input x-model="namespace" @change="reloadAll()" class="mt-2 h-11 w-full rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm outline-none focus:border-coral" placeholder="default">
+        </article>
+        <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold text-zinc-100">记忆网关</h2>
+            <div class="flex gap-2">
+              <button type="button" @click="gwLoad()" class="tap rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 py-1.5 text-xs text-zinc-100 transition duration-150 ease-in-out hover:border-coral">读取</button>
+              <button type="button" @click="gwSave()" class="tap rounded-2xl bg-coral px-3 py-1.5 text-xs font-semibold text-zinc-950 transition duration-150 ease-in-out active:bg-coral/80">保存</button>
+            </div>
+          </div>
+          <label class="mt-3 block text-xs text-zinc-400">上游地址</label>
+          <input x-model="gwAddress" class="mt-2 h-11 w-full rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm text-zinc-100 outline-none transition duration-150 ease-in-out focus:border-coral" placeholder="CF 账号 ID(32 位),或完整地址,如 new-api 的 https://…/v1">
+          <p class="mt-1 text-[11px] leading-5 text-zinc-500">chat 走 compat,全 provider;messages / responses 走各 provider 原生端点,模型名带 provider/ 前缀;模型列表走 compat 目录。BYOK 钥匙在 AI Gateway 仪表盘;CF 令牌去 Worker Secrets 加 CLOUDFLARE_API_TOKEN。Gateway ID 在下方环境设置里,默认 default。</p>
+          <div class="mt-4 flex items-center justify-between">
+            <label class="text-xs text-zinc-400">助手</label>
+            <button type="button" @click="gwAdd()" class="tap rounded-2xl border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 transition duration-150 ease-in-out hover:border-coral hover:text-zinc-100">+ 添加助手</button>
+          </div>
+          <p class="mt-1 text-[11px] text-zinc-500">名字即地址路径段;主模型支持 * 通配,只有主模型有记忆、进 Dream。</p>
+          <template x-for="(idn, i) in gwIdentities" :key="i">
+            <div class="mt-2 space-y-2 rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-3">
+              <div class="flex items-center gap-2">
+                <input x-model="idn.slug" class="h-10 min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="名字,如 coder">
+                <button type="button" @click="gwIdentities.splice(i, 1)" class="tap shrink-0 rounded-xl border border-zinc-800 px-3 py-2 text-xs text-zinc-500 transition hover:border-coral hover:text-zinc-100">移除</button>
+              </div>
+              <input x-model="idn.modelsText" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="主模型,逗号分隔,如 anthropic/claude-opus-5, *fable*">
+              <input x-model="idn.namespace" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="写入空间,留空与名字同名">
+              <input x-model="idn.readNamespacesText" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="召回空间,逗号分隔;留空只读写入空间;[] 不召回">
+              <p class="text-[11px] text-zinc-500">最多 8 个召回空间，共用注入预算。共享时填同一空间；迁移时写新空间、召回保留旧空间。</p>
+              <div class="flex flex-wrap gap-x-4 gap-y-2 pt-1">
+                <template x-for="k in gwKeyOptions" :key="k.id">
+                  <label class="flex items-center gap-1.5 text-xs text-zinc-400"><input type="checkbox" :value="k.id" x-model="idn.keys" class="h-4 w-4 accent-[#f4a07c]"><span x-text="k.label"></span></label>
+                </template>
+              </div>
+              <details class="pt-1">
+                <summary class="cursor-pointer text-xs text-zinc-500">高级</summary>
+                <label class="mt-2 block text-xs text-zinc-400">Claude 思考块</label>
+                <select x-model="idn.anthropicThinking" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral">
+                  <option value="passthrough">原样透传(思考开着时跳过注入)</option>
+                  <option value="drop_block">临时记忆 + 上游丢弃失配思考(需 beta)</option>
+                </select>
+                <label class="mt-2 block text-xs text-zinc-400">单次记忆字数上限</label>
+                <input x-model="idn.maxMemoryChars" type="number" min="256" max="24000" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="留空默认 6000">
+              </details>
+            </div>
+          </template>
+          <div x-show="!gwIdentities.length" class="mt-2 text-xs text-zinc-500">还没有助手。点「读取」拉取线上配置,或直接添加。</div>
+          <template x-if="gwGroups.length">
+            <div class="mt-4">
+              <label class="text-xs text-zinc-400">环境设置</label>
+              <p class="mt-1 text-[11px] text-zinc-500">留空用默认值,占位灰字是当前生效值;保存后最长 10 秒全网生效。</p>
+              <template x-for="g in gwGroups" :key="g.group">
+                <fieldset class="mt-2 rounded-2xl border border-zinc-800 p-3">
+                  <legend class="px-1 text-xs text-zinc-500" x-text="g.group"></legend>
+                  <template x-for="item in g.items" :key="item.name">
+                    <div class="mt-2">
+                      <label class="block text-xs text-zinc-400" x-text="item.label"></label>
+                      <input x-model="item.value" :placeholder="item.deployed || '未设置,用代码默认值'" :title="item.name" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral">
+                    </div>
+                  </template>
+                </fieldset>
+              </template>
+            </div>
+          </template>
+          <template x-if="gwSecrets.length">
+            <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-zinc-500">
+              <template x-for="s in gwSecrets" :key="s.label">
+                <span x-text="(s.present ? '✓ ' : '— ') + s.label"></span>
+              </template>
+            </div>
+          </template>
         </article>
       </section>
     </main>
@@ -990,7 +1060,8 @@ function memoryAdmin() {
       { id: 'review', label: '审核队列', icon: 'inbox' },
       { id: 'memory', label: '重要记忆', icon: 'database' },
       { id: 'starmap', label: '星图', icon: 'sparkles' },
-      { id: 'more', label: '更多', icon: 'layers' }
+      { id: 'more', label: '更多', icon: 'layers' },
+      { id: 'settings', label: '设置', icon: 'settings' }
     ],
     moreNav: [
       { id: 'precious', label: '珍贵' },
@@ -1000,6 +1071,17 @@ function memoryAdmin() {
     ],
     canonicalMemoryTypes: ['fact', 'event', 'preference', 'relationship', 'boundary', 'habit', 'decision', 'note'],
     limits: { fact: 120, event: 80, preference: 80, relationship: 80, boundary: 80, habit: 80, decision: 80, note: 120 },
+    gwKeyOptions: [
+      { id: 'CHATBOX_API_KEY', label: '主钥匙' },
+      { id: 'IM_API_KEY', label: '第二把' },
+      { id: 'DEBUG_API_KEY', label: '维护' },
+      { id: 'GUIDE_DOG_API_KEY', label: '导盲犬' }
+    ],
+    gwAddress: '',
+    gwIdentities: [],
+    gwGroups: [],
+    gwSecrets: [],
+    gwBusy: false,
     page: 'today',
     moreView: 'precious',
     workerUrl: localStorage.getItem('aelios.admin.workerUrl') || location.origin,
@@ -1104,7 +1186,7 @@ function memoryAdmin() {
       let payload = null;
       try { payload = text ? JSON.parse(text) : null; } catch (error) { payload = { raw: text }; }
       if (!response.ok) {
-        const message = payload && payload.error && payload.error.message ? payload.error.message : response.status + ' ' + response.statusText;
+        const message = payload && payload.error ? (payload.error.message || payload.error) : response.status + ' ' + response.statusText;
         throw new Error(message);
       }
       return payload || {};
@@ -1115,6 +1197,65 @@ function memoryAdmin() {
       window.setTimeout(function() {
         if (self.toast === message) self.toast = '';
       }, 2400);
+    },
+    async gwLoad() {
+      if (this.gwBusy) return;
+      this.gwBusy = true;
+      try {
+        const config = await this.request('/api/gateway/config');
+        this.gwAddress = config.upstream && config.upstream.address || '';
+        this.gwIdentities = (config.identities || []).map(function(idn) {
+          return {
+            slug: idn.slug || '',
+            modelsText: (idn.models || []).join(', '),
+            namespace: idn.namespace || '',
+            readNamespacesText: idn.readNamespaces ? (idn.readNamespaces.length ? idn.readNamespaces.join(', ') : '[]') : '',
+            keys: idn.keys && idn.keys.length ? idn.keys.slice() : ['CHATBOX_API_KEY'],
+            anthropicThinking: idn.anthropicThinking || 'passthrough',
+            maxMemoryChars: idn.maxMemoryChars || ''
+          };
+        });
+        const envData = await this.request('/api/gateway/env');
+        this.gwGroups = envData.groups || [];
+        this.gwSecrets = envData.secrets || [];
+        this.notify('网关配置读好了');
+      } catch (error) { this.notify('网关读取失败:' + error.message); }
+      this.gwBusy = false;
+    },
+    gwAdd() {
+      this.gwIdentities.push({ slug: '', modelsText: '', namespace: '', readNamespacesText: '', keys: ['CHATBOX_API_KEY'], anthropicThinking: 'passthrough', maxMemoryChars: '' });
+    },
+    async gwSave() {
+      if (this.gwBusy) return;
+      this.gwBusy = true;
+      try {
+        const identities = this.gwIdentities.map(function(idn) {
+          const out = {
+            slug: (idn.slug || '').trim(),
+            keys: idn.keys,
+            models: (idn.modelsText || '').split(/[,，\n]/).map(function(s) { return s.trim(); }).filter(Boolean)
+          };
+          if ((idn.namespace || '').trim()) out.namespace = idn.namespace.trim();
+          const reads = (idn.readNamespacesText || '').trim();
+          if (reads) out.readNamespaces = reads === '[]' ? [] : reads.split(/[,，\n]/).map(function(s) { return s.trim(); }).filter(Boolean);
+          if (idn.anthropicThinking && idn.anthropicThinking !== 'passthrough') out.anthropicThinking = idn.anthropicThinking;
+          const budget = parseInt(idn.maxMemoryChars, 10);
+          if (budget) out.maxMemoryChars = budget;
+          return out;
+        });
+        const config = { version: 3, identities: identities };
+        if (this.gwAddress.trim()) config.upstream = { address: this.gwAddress.trim() };
+        if (this.gwGroups.length) {
+          const settings = {};
+          this.gwGroups.forEach(function(g) {
+            g.items.forEach(function(item) { if ((item.value || '').trim()) settings[item.name] = item.value.trim(); });
+          });
+          config.settings = settings;
+        }
+        const result = await this.request('/api/gateway/config', { method: 'PUT', body: JSON.stringify(config) });
+        this.notify('保存好了,' + (result.identities || 0) + ' 个助手,环境设置最长 10 秒全网生效');
+      } catch (error) { this.notify('网关保存失败:' + error.message); }
+      this.gwBusy = false;
     },
     async reloadAll() {
       this.savePrefs();

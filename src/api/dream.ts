@@ -1,6 +1,7 @@
 import { authenticate } from "../auth/apiKey";
 import { listDreamRunsForNamespace } from "../db/dreamRuns";
 import { listJudgedCandidatesInRange, listMemoriesCreatedInRange, listMemoriesGoneDormantInRange } from "../db/v2";
+import { runCandidateJudge } from "../memory/candidateJudge";
 import {
   countRawMessagesForDateLabel,
   getDateLabelsLookback,
@@ -104,6 +105,17 @@ export async function handleDreamRun(request: Request, env: Env): Promise<Respon
       dry_run: dryRun,
       result
     };
+
+    if (!dryRun) {
+      try {
+        response.candidate_judge = await runCandidateJudge(env, namespace);
+      } catch (error) {
+        response.candidate_judge = {
+          ran: false,
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
 
     if (dryRun && result.ran) {
       if ("proposal" in result && result.proposal) response.proposal = result.proposal;

@@ -84,7 +84,16 @@ export async function createEmbedding(env: Env, text: string): Promise<number[] 
 export async function upsertMemoryEmbedding(env: Env, memory: MemoryRecord): Promise<boolean> {
   if (!env.VECTORIZE || memory.status !== "active") return false;
 
-  const vector = await createEmbedding(env, memory.content);
+  const tags = (() => {
+    try {
+      const parsed = JSON.parse(memory.tags || "[]") as unknown;
+      return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+    } catch {
+      return [];
+    }
+  })();
+  const searchable = [memory.type, ...tags, memory.content].filter(Boolean).join("\n");
+  const vector = await createEmbedding(env, searchable);
   if (!vector || !memory.vector_id) return false;
 
   await env.VECTORIZE.upsert([

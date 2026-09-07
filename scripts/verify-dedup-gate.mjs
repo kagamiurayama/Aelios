@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
 import { formatBootStable } from "../src/assembler/types.ts";
+import { IMPRESSION_DISCLAIMER } from "../src/memory/impression.ts";
 import { createMemory, getMemoryById } from "../src/db/memories.ts";
 import {
   getMonthlyLog,
@@ -974,8 +975,10 @@ async function approveCandidate(env, candidate, body = {}) {
   });
   assert.match(text, /<impressions>/);
   assert.match(text, /2026-07-15·昨日/);
+  assert.match(text, new RegExp(IMPRESSION_DISCLAIMER));
   assert.ok(text.includes("2026-W28·本周") || text.includes("2026-07-15·昨日"));
-  assert.ok(text.length <= 1000 + "<impressions>\n</impressions>".length + 10);
+  const wrap = `<impressions>\n${IMPRESSION_DISCLAIMER}\n</impressions>`.length;
+  assert.ok(text.length <= 1000 + wrap + 10);
   assert.doesNotMatch(text, /<yesterday_log>/);
 }
 
@@ -994,7 +997,8 @@ async function approveCandidate(env, candidate, body = {}) {
   });
   assert.match(oversizedDaily, /<impressions>/);
   assert.match(oversizedDaily, /2026-07-15·昨日/);
-  assert.ok(oversizedDaily.length <= 100 + "<impressions>\n</impressions>".length + 5);
+  const wrap = `<impressions>\n${IMPRESSION_DISCLAIMER}\n</impressions>`.length;
+  assert.ok(oversizedDaily.length <= 100 + wrap + 5);
 }
 
 console.log("verify-dedup-gate: all checks passed");

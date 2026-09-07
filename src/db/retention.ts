@@ -19,6 +19,19 @@ export async function deleteOldMessages(
   namespace: string,
   cutoff: string
 ): Promise<number> {
+  try {
+    await db
+      .prepare(
+        `DELETE FROM message_fts
+         WHERE message_id IN (
+           SELECT id FROM messages WHERE namespace = ? AND created_at < ?
+         )`
+      )
+      .bind(namespace, cutoff)
+      .run();
+  } catch (error) {
+    console.error("retention: message fts cleanup failed", error);
+  }
   const result = await db
     .prepare("DELETE FROM messages WHERE namespace = ? AND created_at < ?")
     .bind(namespace, cutoff)
@@ -166,6 +179,14 @@ async function hardDeleteMemoriesBatch(
 ): Promise<number> {
   if (ids.length === 0) return 0;
   const placeholders = ids.map(() => "?").join(", ");
+  try {
+    await db
+      .prepare(`DELETE FROM memory_fts WHERE memory_id IN (${placeholders})`)
+      .bind(...ids)
+      .run();
+  } catch (error) {
+    console.error("retention: memory fts hard-delete cleanup failed", error);
+  }
   const result = await db
     .prepare(
       `DELETE FROM memories WHERE namespace = ? AND id IN (${placeholders})`

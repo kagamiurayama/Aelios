@@ -5,6 +5,7 @@ import {
 } from "../db/memories";
 import type { Env, MemoryApiRecord, MemoryLifecycleRow, MemoryRecord } from "../types";
 import { createEmbedding } from "./embedding";
+import { mergeHybridRanks, tokenizeQuery } from "./queryShape";
 
 type MetadataMap = Record<string, unknown>;
 
@@ -372,18 +373,34 @@ export async function searchMemoriesWithProvenance(
     types?: string[];
     topK?: number;
     includeHistory?: boolean;
+    lexicalTokens?: string[];
     // When set (chat hot path), recall-count accounting is scheduled off the response path.
     waitUntil?: (promise: Promise<unknown>) => void;
   }
 ): Promise<SearchMemoriesResult> {
   const topK = getTopK(env, input.topK);
-  const vectorOutcome = await searchWithVectorize(env, {
-    namespace: input.namespace,
-    query: input.query,
-    types: input.types,
-    topK,
-    includeHistory: input.includeHistory
-  });
+  const lexicalTokens = input.lexicalTokens ?? tokenizeQuery(input.query);
+  const [vectorOutcome, textRecords] = await Promise.all([
+    searchWithVectorize(env, {
+      namespace: input.namespace,
+      query: input.query,
+      types: input.types,
+      topK,
+      includeHistory: input.includeHistory
+    }),
+    searchMemoriesByText(env.DB, {
+      namespace: input.namespace,
+      query: input.query,
+      tokens: lexicalTokens,
+      types: input.types,
+      limit: Math.max(topK, 50),
+      includeHistory: input.includeHistory
+    })
+  ]);
+
+  const lexicalRecords = textRecords
+    .filter((record) => isRecallableMemory(record, { includeHistory: input.includeHistory }))
+    .map((record) => ({ ...record, backed: true as const }));
 
   let records: Array<MemoryRecord & { score: number; backed: boolean }>;
   let lifecycleByMemoryId = new Map<string, MemoryLifecycleRow | null>();
@@ -394,20 +411,25 @@ export async function searchMemoriesWithProvenance(
   }
 
   if (vectorOutcome && vectorOutcome.records.length > 0) {
-    records = vectorOutcome.records;
-    lifecycleByMemoryId = vectorOutcome.lifecycleByMemoryId;
+    // LMC-5 / Hindsight: vector and lexical run together, then RRF. Lexical is
+    // not a last-resort fallback — keyword hits must survive a noisy embedding.
+    records = mergeHybridRanks(vectorOutcome.records, lexicalRecords, topK);
+    const missingLifecycle = records
+      .map((record) => record.id)
+      .filter((id) => !vectorOutcome.lifecycleByMemoryId.has(id));
+    lifecycleByMemoryId = new Map(vectorOutcome.lifecycleByMemoryId);
+    if (missingLifecycle.length > 0) {
+      const joined = await fetchMemoriesWithLifecycleByIds(env.DB, {
+        namespace: input.namespace,
+        ids: missingLifecycle
+      });
+      for (const { record, lifecycle } of joined) {
+        lifecycleByMemoryId.set(record.id, lifecycle);
+      }
+    }
   } else {
     // D1 全文兜底: 结果本来就来自 memories 表, 天然全部有 D1 背书。
-    const textRecords = await searchMemoriesByText(env.DB, {
-      namespace: input.namespace,
-      query: input.query,
-      types: input.types,
-      limit: Math.max(topK, 50),
-      includeHistory: input.includeHistory
-    });
-    records = textRecords
-      .filter((record) => isRecallableMemory(record, { includeHistory: input.includeHistory }))
-      .map((record) => ({ ...record, backed: true }));
+    records = lexicalRecords.slice(0, topK);
     const joined = await fetchMemoriesWithLifecycleByIds(env.DB, {
       namespace: input.namespace,
       ids: records.map((record) => record.id)
@@ -443,6 +465,7 @@ export async function searchMemories(
     types?: string[];
     topK?: number;
     includeHistory?: boolean;
+    lexicalTokens?: string[];
     waitUntil?: (promise: Promise<unknown>) => void;
   }
 ): Promise<MemoryApiRecordWithProvenance[]> {

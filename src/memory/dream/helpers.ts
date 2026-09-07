@@ -92,6 +92,7 @@ export type DailyDigestSkipReason =
   | "model_error"
   | "model_invalid_json"
   | "extract_model_error"
+  | "extract_invalid_json"
   | "v2_disabled";
 
 export interface DailyDigestSkipped {
