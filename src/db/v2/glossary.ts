@@ -147,18 +147,18 @@ export async function matchGlossary(
   const result = await db
     .prepare(
       `SELECT * FROM glossary
-       WHERE namespace = ?1 AND status = 'active'
+       WHERE namespace = ? AND status = 'active'
          AND (
-           (length(term) >= 2 AND instr(lower(?2), lower(term)) > 0)
+           (length(term) >= 2 AND instr(lower(?), lower(term)) > 0)
            OR EXISTS (
              SELECT 1 FROM json_each(COALESCE(aliases, '[]'))
              WHERE length(json_each.value) >= 2
-               AND instr(lower(?2), lower(json_each.value)) > 0
+               AND instr(lower(?), lower(json_each.value)) > 0
            )
          )
        ORDER BY term`
     )
-    .bind(input.namespace, query)
+    .bind(input.namespace, query, query)
     .all<GlossaryRow>();
   return result.results ?? [];
 }

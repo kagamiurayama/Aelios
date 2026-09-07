@@ -1,4 +1,6 @@
 export interface Env {
+  GATEWAY_CONFIG?: string;
+  AI_GATEWAY_ID?: string;
   DB: D1Database;
   AI?: Ai;
   MEMORY_QUEUE?: Queue<QueueMessage>;
@@ -75,7 +77,7 @@ export interface Env {
   DEDUP_COSINE?: string;
   // L4 每区（type）active 条数硬上限，0 或不设 = 关闭（母帖第一节，对抗膨胀的闸）
   MEMORY_ZONE_CAP?: string;
-  // 候选队列自动评审（judge），默认关闭
+  // 候选队列自动评审（judge），默认开启；设 "false" 关闭
   CANDIDATE_JUDGE_ENABLED?: string;
   JUDGE_MODEL?: string;
   JUDGE_MAX_CANDIDATES?: string;
@@ -134,7 +136,7 @@ export interface RetentionQueueMessage {
   namespace: string;
 }
 
-export type QueueMessage = RetentionQueueMessage;
+export type QueueMessage = RetentionQueueMessage | import("./gateway/record").GatewayExchange;
 
 export type Scope =
   | "chat:proxy"
@@ -227,6 +229,8 @@ export interface MessageRecord {
   content: string;
   source: string | null;
   created_at: string;
+  /** Turn-local order. Hash IDs are unique only; same-timestamp rows sort by seq. */
+  seq?: number;
 }
 
 export type MemoryVersionStatus = "current" | "superseded" | "under_review";

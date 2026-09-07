@@ -241,6 +241,11 @@ export async function callOpenAICompat(env: Env, body: OpenAIChatRequest): Promi
     }
   }
 
+  if (env.AI_GATEWAY_ID && env.AI) {
+    return env.AI.gateway(env.AI_GATEWAY_ID).run({
+      provider: "compat", endpoint: "chat/completions", headers: {}, query: body
+    });
+  }
   return fetch(getOpenAICompatUrl(env), {
     method: "POST",
     headers: buildOpenAICompatHeaders(env),

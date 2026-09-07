@@ -59,7 +59,7 @@ export function buildDigestPrompt(input: {
     "",
     "Dream 输出格式：",
     "- title 是 12 字以内标题。",
-    "- summary 写成一段简短自然中文，描述这次 dream 整理出了什么。",
+    "- summary 写成一段简短自然中文，描述这次 dream 整理出了什么。不要编造当天原文没有的具体情节。",
     "- sections 最多 3 段，每段有 heading 和 content；没有必要可以给空数组。",
     "- memories_to_add 保留兼容字段，v2 下默认输出空数组。",
     "- memories_to_update 只针对给出的旧记忆 id。",

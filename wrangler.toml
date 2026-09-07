@@ -31,14 +31,20 @@ crons = ["10 22 * * *"]
 binding = "AI"
 
 [vars]
+<<<<<<< HEAD
 CLOUDFLARE_ACCOUNT_ID = "42f5738a04e30ebbf180dd35bfb3b040"
 ERRALIA_RUNTIME_STATUS_URL = "https://control.shanting.cloud/api/v1/miniapp/ashuo/bootstrap"
 # Visible model knobs. These are intentionally in wrangler.toml so they show
 # up in Cloudflare Variables and can be changed without touching code.
+=======
+# Deployment defaults. Everything here can be overridden from /admin/gateway
+# without touching Cloudflare Variables; the page shows these values as hints.
+AI_GATEWAY_ID = "default"
+>>>>>>> upstream/main
 PUBLIC_MODEL_NAME = "companion"
 CHAT_MODEL = "deepseek/deepseek-v4-pro"
-MEMORY_FILTER_MAX_CANDIDATES = "12"
-MEMORY_FILTER_MAX_OUTPUT = "3"
+MEMORY_FILTER_MAX_CANDIDATES = "16"
+MEMORY_FILTER_MAX_OUTPUT = "6"
 MEMORY_FILTER_MAX_CONTENT_CHARS = "700"
 # Recall floor on the raw embedding score, applied BEFORE the reranker. Low on
 # purpose: embeddinggemma under-scores reworded-but-relevant hits (~0.15-0.20).
@@ -71,20 +77,12 @@ DREAM_MAX_MESSAGES = "40"
 DREAM_MEMORY_CONTEXT_LIMIT = "40"
 DREAM_MAX_RUNS = "10"
 DREAM_MAX_TOKENS = "8000"
-ANTHROPIC_THINKING_ENABLED = "false"
-ANTHROPIC_THINKING_BUDGET = "1024"
-ANTHROPIC_CACHE_ENABLED = "true"
-ANTHROPIC_AUTO_CACHE_ENABLED = "true"
-ANTHROPIC_ROLLING_CACHE_ENABLED = "true"
-ANTHROPIC_CACHE_TTL = "5m"
-# For custom Anthropic-compatible providers whose base_url already ends in /v1,
-# keep this as "messages". If the base_url is only the root domain, use
-# "v1/messages".
-CUSTOM_ANTHROPIC_MESSAGES_PATH = "messages"
-# GitHub daily archive pull. Leave GITHUB_DAILY_REPO empty to disable.
-# Token: `wrangler secret put GITHUB_DAILY_TOKEN` (fine-grained PAT, read-only contents on target repo).
-GITHUB_DAILY_REPO = ""
-GITHUB_DAILY_PATH = "archive/daily"
+# Dream 抽完候选后自动评审：靠谱的入库，没据的丢掉。设 false 才回到全人工。
+CANDIDATE_JUDGE_ENABLED = "true"
+# GitHub daily archive pull（可选，默认禁用）。要用：去 Dashboard 手动加变量
+# GITHUB_DAILY_REPO（owner/repo）和 Secret GITHUB_DAILY_TOKEN（fine-grained PAT，
+# 只读目标仓库 Contents）；代码内默认路径 archive/daily，可用 GITHUB_DAILY_PATH 覆盖。
+# 注意：空值 var 别写进本文件——Deploy 按钮的表单会把空 vars 渲染成必填项，挡住一键部署。
 
 # Private/account-specific variables live in the Cloudflare Dashboard:
 # AI_GATEWAY_BASE_URL, CHATBOX_API_KEY, MEMORY_MCP_API_KEY,

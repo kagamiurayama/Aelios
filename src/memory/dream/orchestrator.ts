@@ -5,6 +5,7 @@ import { newId } from "../../utils/ids";
 import { nowIso } from "../../utils/time";
 import { readString } from "../../utils/parse";
 import {
+  formatDreamCursor,
   getDateLabelsLookback,
   getDateRangeForLabel,
   getTargetDigestDateLabel,
@@ -106,7 +107,7 @@ export async function runDailyMemoryDigest(
   const cursorName = `dream:${namespace}:${dateLabel}`;
   const legacyCursorName = `daily_digest:${namespace}:${dateLabel}`;
   const cursor = (await readCursor(env.DB, cursorName)) ?? (await readCursor(env.DB, legacyCursorName));
-  const cursorState = options.force ? { done: false, after: null } : readDailyCursor(cursor, startIso, endIso);
+  const cursorState = options.force ? { done: false, after: null, afterId: null } : readDailyCursor(cursor, startIso, endIso);
   if (cursorState.done) {
     await safeFinishDreamRun(env.DB, {
       id: dreamRunId,
@@ -122,6 +123,7 @@ export async function runDailyMemoryDigest(
     startCreatedAt: startIso,
     endCreatedAt: endIso,
     afterCreatedAt: cursorState.after,
+    afterId: cursorState.afterId,
     limit: maxMessages
   });
   if (fetchedMessages.length === 0) {
@@ -206,8 +208,8 @@ export async function runDailyMemoryDigest(
     };
   }
 
-  if (extractPhase.extractReason === "model_error") {
-    console.error("dream: extract model failed; cursor not advanced", {
+  if (extractPhase.extractReason) {
+    console.error("dream: extract failed; cursor not advanced", {
       date: dateLabel,
       reason: extractPhase.extractReason,
       model: extractPhase.extractModel,
@@ -216,18 +218,18 @@ export async function runDailyMemoryDigest(
     await safeFinishDreamRun(env.DB, {
       id: dreamRunId,
       status: "error",
-      reason: "extract_model_error",
+      reason: extractPhase.extractReason === "model_invalid_json" ? "extract_invalid_json" : "extract_model_error",
       model: extractPhase.extractModel ?? modelResult.model,
       processedMessages: messages.length,
       error: extractPhase.extractStatus
         ? `status=${extractPhase.extractStatus}`
-        : "model_error"
+        : extractPhase.extractReason
     });
     return {
       ran: false,
       mode: "dream",
       date: dateLabel,
-      reason: "extract_model_error",
+      reason: extractPhase.extractReason === "model_invalid_json" ? "extract_invalid_json" : "extract_model_error",
       startIso,
       endIso,
       cursor,
@@ -380,7 +382,11 @@ export async function runDailyMemoryDigest(
     });
   }
 
-  await writeCursor(env.DB, cursorName, hasMore ? lastMessage.created_at : `done:${lastMessage.created_at}`);
+  await writeCursor(env.DB, cursorName, formatDreamCursor({
+    done: !hasMore,
+    createdAt: lastMessage.created_at,
+    id: lastMessage.id
+  }));
 
   // LMC-5 phase report is additive audit data — never stuff into dream_runs.error
   // (legacy shape is JSON array of apply errors, or null). Persist via memory_events.

@@ -10,6 +10,7 @@
 
 import type { MemoryApiRecord, OpenAIChatMessage } from "../types";
 import type { BootPackage } from "../memory/v2/recall";
+import { IMPRESSION_DISCLAIMER } from "../memory/impression";
 
 // ---------------------------------------------------------------------------
 // Block definition
@@ -196,7 +197,7 @@ export function formatBootStable(boot: BootPackage): string {
   const parts: string[] = [];
   const impressions = buildImpressionsLadder(boot);
   if (impressions.length > 0) {
-    parts.push("<impressions>", ...impressions, "</impressions>");
+    parts.push("<impressions>", IMPRESSION_DISCLAIMER, ...impressions, "</impressions>");
   }
   if (boot.glossary.length > 0) {
     const entries = boot.glossary.map((g) => `${g.term}: ${g.definition}`);
