@@ -31,6 +31,8 @@ crons = ["10 22 * * *"]
 binding = "AI"
 
 [vars]
+CLOUDFLARE_ACCOUNT_ID = "42f5738a04e30ebbf180dd35bfb3b040"
+ERRALIA_RUNTIME_STATUS_URL = "https://control.shanting.cloud/api/v1/miniapp/ashuo/bootstrap"
 # Visible model knobs. These are intentionally in wrangler.toml so they show
 # up in Cloudflare Variables and can be changed without touching code.
 PUBLIC_MODEL_NAME = "companion"
