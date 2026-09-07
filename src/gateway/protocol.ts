@@ -92,12 +92,6 @@ export function sanitizeCacheControl(body: Body, protocol: Protocol): void {
   const last = lastCacheableBlock(body, true);
   if (object(last) && !last.cache_control) last.cache_control = cc;
 }
-/** A new signature binds today's injected memory, even if old signatures precede it. */
-export function memoryThinkingCompatible(body: Body, protocol: Protocol, headers: Headers): boolean {
-  if (protocol !== "messages" || body.thinking?.type === "disabled") return true;
-  return body.thinking?.block_binding?.prefix_mismatch_behavior === "drop_block" &&
-    (headers.get("anthropic-beta") || "").split(",").map(s => s.trim()).includes("thinking-binding-controls-2026-08-01");
-}
 // Encrypted reasoning stays allowed; only server-owned history breaks request-only memory.
 export function hasServerState(body: Body, protocol: Protocol): boolean {
   return protocol === "responses" && !!(body.previous_response_id || body.conversation ||

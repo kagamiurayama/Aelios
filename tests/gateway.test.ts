@@ -283,13 +283,13 @@ test("missing CF token fails loudly instead of leaking another credential", asyn
   assert.match(JSON.parse(text).error.message, /CLOUDFLARE_API_TOKEN/);
   assert.equal(queue.length, 0); // Preflight fails before recording.
 });
-test("thinking passthrough preserves reasoning without creating ephemeral prefix bindings", async () => {
+test("thinking passthrough preserves reasoning and still injects memory", async () => {
   precious("partner-a", "Cloudflare fan");
   setConfig(config([{ ...identity(), anthropicThinking: "passthrough" }]));
   const body = { model: "partner", max_tokens: 2048, messages: [{ role: "user", content: "Hi Cloudflare" }], thinking: { type: "adaptive" } };
-  assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "skipped-thinking");
+  assert.equal((await run("/v1/messages", body)).response.headers.get("x-aelios-memory"), "injected");
   assert.deepEqual(calls[0].query.thinking, body.thinking);
-  assert.deepEqual(calls[0].query.messages, body.messages);
+  assert.ok(calls[0].query.messages[0].content.includes("Cloudflare fan"));
   assert.equal((await run("/v1/messages", { ...body, thinking: { type: "disabled" } })).response.headers.get("x-aelios-memory"), "injected");
 });
 test("automatic caching lowers to the last cacheable block without rewriting system", async () => {

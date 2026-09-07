@@ -99,12 +99,13 @@ Cron 继续维护配置的写入空间，避免只读共享关系无意触发另
 
 ### Anthropic thinking
 
-- `passthrough`（默认）：不修改 thinking。未明确关闭思考时跳过注入，响应头为 `x-aelios-memory: skipped-thinking`。
-  末尾追加不影响此前 thinking，但会成为**本次新生成 thinking** 的前缀；下轮撤销补丁可能导致签名失配。
+- `passthrough`（默认）：不修改 thinking，记忆照常注入。召回片段只追加在最后一轮 user 消息尾部，
+  不改历史块。实测 Vertex 线路默认不校验 thinking 的前缀绑定(补丁下轮消失,旧签名块仍 200),
+  只有客户端显式携带 `block_binding` 时前缀才进入签名范围。
 - `drop_block`：在每次请求（含工具续轮）合并 `thinking.block_binding.prefix_mismatch_behavior: "drop_block"`，
   以及 `thinking-binding-controls-2026-08-01` beta header。仅适用于支持该 beta 的线路，会牺牲部分思考连续性。
 - 显式 `thinking.type: "disabled"`：直接临时注入，不添加该 beta。
-- 客户端自己携带合法的 `drop_block` 和对应 beta 时，透传模式也允许注入。
+- 注意:`drop_block` 依赖上游认识 `block_binding` 字段;Vertex 线路会直接 400 `unrecognizedProperty`,勿用于 Vertex。
 - 非主模型不自动启用 thinking，不自动添加 binding 设置。
 
 本地只能验证结构，不能验证厂商的加密签名。历史签名块、空 thinking 文本、redacted data 原样保留。
