@@ -1,7 +1,7 @@
 import { authenticate } from "../auth/apiKey";
 import type { Env } from "../types";
 import { json, openAiError } from "../utils/json";
-import { findIdentity, loadConfig } from "../gateway/config";
+import { findIdentity, loadConfig, type GatewayConfig } from "../gateway/config";
 import { catalogUrl } from "../gateway/upstream";
 
 /** The upstream owns the real catalog; local main models are only hints when it cannot answer. */
@@ -9,12 +9,12 @@ export async function handleModels(request: Request, env: Env, slug: string | nu
   const auth = await authenticate(request, env);
   if (!auth.ok) return openAiError("Unauthorized", 401, "authentication_error");
 
-  let config;
+  let config: GatewayConfig;
   try { config = await loadConfig(env); }
   catch { return openAiError("Gateway configuration unavailable. Apply migrations.", 503); }
 
   const identity = findIdentity(config, auth, slug);
-  if (!identity) return openAiError("No identity available for this key. Configure /admin/gateway.", 403);
+  if (!identity) return openAiError("No identity available for this key. Configure /admin.", 403);
 
   // The catalog lives on the AI Gateway compat surface; CF REST has no GET /models (405).
   const token = env.CLOUDFLARE_API_TOKEN;

@@ -1,6 +1,6 @@
 import type { Env } from "../types";
 import { isMainModel, PATHS, type GatewayConfig, type Identity, type Protocol } from "./config";
-import { applyThinkingPolicy, sanitizeCacheControl, type Body } from "./protocol";
+import { applyThinkingPolicy, PROTECTED_TOOL_FIELDS, rejectedFieldNames, sanitizeCacheControl, STRIPPABLE_TOOL_FIELDS, stripToolField, type Body } from "./protocol";
 import { normalizeRequest, validateRequest } from "./request";
 
 const ACCOUNT_RE = /^[a-f0-9]{32}$/i;
@@ -49,7 +49,7 @@ function parseGatewayHost(address: string): { accountId: string } | null {
 
 export function resolveUpstream(env: Env, config: GatewayConfig): ResolvedUpstream {
   const address = configuredAddress(env, config);
-  if (!address) throw new Error("Upstream not configured. Set the CF account in /admin/gateway.");
+  if (!address) throw new Error("Upstream not configured. Set the CF account in /admin.");
   const trimmed = stripAddress(address);
   const gatewayId = resolveGatewayId(env, trimmed);
 
@@ -106,15 +106,16 @@ export function routeFor(resolved: ResolvedUpstream, protocol: Protocol, model: 
   if (!provider) throw new UpstreamRouteError(
     `"${model}" has no provider prefix; use the author/model form so the BYOK endpoint is known.`);
   const custom = provider.startsWith("custom-");
-  const path = protocol === "messages" ? (custom ? `/messages` : `/v1/messages`)
-    : provider === "openai" || custom ? `/responses` : `/v1/responses`;
+  const path = protocol === "messages" ? (custom ? "/messages" : "/v1/messages")
+    : provider === "openai" || custom ? "/responses" : "/v1/responses";
   return { url: `${gw}/${provider}${path}`, model: native, auth: "cf-aig" };
 }
 
 // One call, one upstream. Model names pass through as written (minus the provider
 // prefix on native endpoints); retries and fallback are AI Gateway's own job.
+export interface PreparedRequest { route: UpstreamRoute; headers: Headers; body: Body; removed: string[] }
 export function prepareGatewayRequest(env: Env, config: GatewayConfig, identity: Identity,
-  protocol: Protocol, original: Request, body: Body) {
+  protocol: Protocol, original: Request, body: Body): PreparedRequest {
   const token = env.CLOUDFLARE_API_TOKEN;
   if (!token) throw new Error("Missing Worker secret CLOUDFLARE_API_TOKEN");
   const route = routeFor(resolveUpstream(env, config), protocol, body.model);
@@ -138,12 +139,61 @@ export function prepareGatewayRequest(env: Env, config: GatewayConfig, identity:
   validateRequest(out, protocol, headers);
   return { route, headers, body: out, removed: normalized.removed };
 }
-export async function callGatewayUpstream(protocol: Protocol, original: Request,
-  prepared: ReturnType<typeof prepareGatewayRequest>, body: Body): Promise<Response> {
+// Isolate-scope learned capability: Vertex-backed and relay lines answer 400
+// "unrecognizedProperty=<field>" to tool-definition fields they do not know
+// (cache_control, eager_input_streaming). Once per isolate per route, the refused
+// fields are learned and stripped before every later send.
+export const rejectedToolFields = new Map<string, Set<string>>();
+
+/** Setting values already reported, so a bad one warns once per isolate, not once per request. */
+const reportedStripSettings = new Set<string>();
+
+/** Operator escape hatch: strip these before the first send and never eat the 400. */
+function preStrippedToolFields(env: Env): string[] {
+  const raw = env.UPSTREAM_STRIP_TOOL_FIELDS?.trim();
+  if (!raw) return [];
+  const named = raw.split(",").map(field => field.trim()).filter(field => /^[A-Za-z_][A-Za-z0-9_]*$/.test(field));
+  const usable = named.filter(field => !PROTECTED_TOOL_FIELDS.has(field));
+  // The setting is free text, and validateRequest already ran, so a typo naming a tool's
+  // identity would ship a broken tool. Refuse those, and say so rather than silently
+  // honouring a shorter list than the operator wrote.
+  if (usable.length !== named.length && !reportedStripSettings.has(raw)) {
+    reportedStripSettings.add(raw);
+    console.warn("UPSTREAM_STRIP_TOOL_FIELDS skipped tool identity fields", {
+      skipped: named.filter(field => PROTECTED_TOOL_FIELDS.has(field))
+    });
+  }
+  return usable;
+}
+
+export async function callGatewayUpstream(env: Env, protocol: Protocol, original: Request,
+  prepared: PreparedRequest, body: Body): Promise<Response> {
   const { route, headers } = prepared;
   // Check the actual wire payload, including the gateway's own modifications.
   validateRequest(body, protocol, headers);
-  return fetch(route.url, {
+  const learned = rejectedToolFields.get(route.url);
+  if (learned) for (const field of learned) stripToolField(body, field);
+  for (const field of preStrippedToolFields(env)) stripToolField(body, field);
+  const send = () => fetch(route.url, {
     method: "POST", headers, body: JSON.stringify(body), signal: original.signal, redirect: "manual"
   });
+  let response = await send();
+  // A relay names one unknown field per 400, and a client can send several at once
+  // (eager_input_streaming on every tool, cache_control on the last one). Learn in a
+  // bounded loop so first contact costs at most one round per strippable field.
+  for (let round = 0; response.status === 400 && round < STRIPPABLE_TOOL_FIELDS.size; round++) {
+    const detail = await response.clone().text().catch(() => "");
+    // Only a field we actually removed justifies a retry; anything else is the caller's 400.
+    const refused: string[] = [];
+    for (const field of rejectedFieldNames(detail)) {
+      if (STRIPPABLE_TOOL_FIELDS.has(field) && stripToolField(body, field)) refused.push(field);
+    }
+    if (!refused.length) break;
+    const known = rejectedToolFields.get(route.url) ?? new Set<string>();
+    for (const field of refused) known.add(field);
+    rejectedToolFields.set(route.url, known);
+    console.log("gateway learned upstream rejects tool fields", { url: route.url, fields: refused });
+    response = await send();
+  }
+  return response;
 }

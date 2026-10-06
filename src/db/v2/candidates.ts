@@ -160,6 +160,26 @@ export async function listJudgedCandidatesInRange(
   return result.results ?? [];
 }
 
+// 自动审核的决定 (含撤回过的)，给后台"这周助手自己定的"清单用，按决定时间倒序。
+export async function listJudgeDecisionsSince(
+  db: D1Database,
+  input: { namespace: string; sinceIso: string; limit?: number }
+): Promise<MemoryCandidateRow[]> {
+  const limit = Math.min(Math.max(Math.floor(input.limit ?? 200), 1), 500);
+  const result = await db
+    .prepare(
+      `SELECT *
+       FROM memory_candidates
+       WHERE namespace = ? AND status IN ('approved', 'discarded') AND updated_at >= ?
+         AND (decision_note LIKE 'judge%' OR decision_note LIKE 'undo: judge%')
+       ORDER BY updated_at DESC
+       LIMIT ?`
+    )
+    .bind(input.namespace, input.sinceIso, limit)
+    .all<MemoryCandidateRow>();
+  return result.results ?? [];
+}
+
 export async function getMemoryCandidateById(
   db: D1Database,
   input: { namespace: string; id: string }
@@ -176,20 +196,29 @@ export async function updateMemoryCandidateStatus(
   input: { namespace: string; id: string; status: string; targetMemoryId?: string | null; decisionNote?: string | null }
 ): Promise<MemoryCandidateRow | null> {
   const now = nowIso();
+  // target_memory_id / decision_note 只在调用方真的传了才写。以前是无条件 SET，
+  // 调用方不传就等于抹成 NULL——judge 把 dream_update / dream_delete 候选 keep 回
+  // pending 时就会丢掉指向的那条记忆，人工再 approve 就变成新建重复记忆而不是 supersede。
+  // 显式传 null 仍然是清空，语义没变。
+  const sets = ["status = ?"];
+  const values: (string | null)[] = [input.status];
+  if ("targetMemoryId" in input) {
+    sets.push("target_memory_id = ?");
+    values.push(input.targetMemoryId ?? null);
+  }
+  if ("decisionNote" in input) {
+    sets.push("decision_note = ?");
+    values.push(input.decisionNote ?? null);
+  }
+  sets.push("updated_at = ?");
+  values.push(now);
   await db
     .prepare(
       `UPDATE memory_candidates
-       SET status = ?, target_memory_id = ?, decision_note = ?, updated_at = ?
+       SET ${sets.join(", ")}
        WHERE namespace = ? AND id = ?`
     )
-    .bind(
-      input.status,
-      input.targetMemoryId ?? null,
-      input.decisionNote ?? null,
-      now,
-      input.namespace,
-      input.id
-    )
+    .bind(...values, input.namespace, input.id)
     .run();
   return getMemoryCandidateById(db, input);
 }

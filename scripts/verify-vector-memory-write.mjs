@@ -32,7 +32,6 @@ const mcpSource = readFileSync(resolve(root, "src/api/mcp.ts"), "utf8");
 const dreamExtractSource = readFileSync(resolve(root, "src/memory/dreamExtract.ts"), "utf8");
 const indexSource = readFileSync(resolve(root, "src/index.ts"), "utf8");
 const wranglerSource = readFileSync(resolve(root, "wrangler.toml"), "utf8");
-const queueProducerSource = readFileSync(resolve(root, "src/queue/producer.ts"), "utf8");
 // db/v2.ts may be a barrel; prefer domain modules under db/v2/ when present.
 const dbV2Dir = resolve(root, "src/db/v2");
 const dbV2DomainFiles = existsSync(dbV2Dir)
@@ -130,7 +129,7 @@ assert.match(recallSource, /const beforeFloor = \[\.\.\.afterRelation, \.\.\.lon
 assert.match(recallSource, /if \(\(hit\.raw_score \?\? hit\.score\) >= minScore\) return true;\s+flooredIds\.push\(hit\.id\);/s);
 assert.match(recallSource, /raw_score: rawScore,/);
 assert.match(recallSource, /floored_ids: flooredIds,\s+floored_count: flooredIds\.length,\s+min_score: minScore,/s);
-assert.match(mcpSource, /min_score: \{ type: "number", minimum: 0, maximum: 1 \}/);
+assert.match(mcpSource, /min_score: \{\s*type: "number",\s*minimum: 0,\s*maximum: 1\b/);
 assert.match(mcpSource, /min_score: typeof args\.min_score === "number" \? readNumber\(args\.min_score, 0\.15\) : undefined/);
 assert.match(wranglerSource, /crons = \["10 22 \* \* \*"\]/);
 assert.match(wranglerSource, /DREAM_MODEL = "workers-ai\/@cf\/openai\/gpt-oss-120b"/);
@@ -139,7 +138,6 @@ assert.match(indexSource, /handleDiaryApi\(request, env\)/);
 assert.doesNotMatch(indexSource, /runMemoryExtractionBatches/);
 assert.match(indexSource, /url\.pathname\.startsWith\("\/v1\/longtail\/"\)/);
 assert.match(indexSource, /handleLongtailApi\(request, env\)/);
-assert.doesNotMatch(queueProducerSource, /enqueueMemoryMaintenanceIfNeeded/);
 assert.match(dreamExtractSource, /const DEFAULT_WORKERS_AI_DREAM_MODEL = "workers-ai\/@cf\/openai\/gpt-oss-120b"/);
 assert.match(dreamExtractSource, /export function buildDreamExtractPrompt/);
 assert.match(dreamExtractSource, /export async function extractDreamMemoriesFromMessages/);

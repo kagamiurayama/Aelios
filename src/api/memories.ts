@@ -23,8 +23,8 @@ import {
   fetchMemoryLifecycleRows,
   getDailyLog,
   getMemoryCandidateById,
-  HandAuthoredProtectedError,
   listGlossary,
+  listJudgeDecisionsSince,
   listMemoryCandidates,
   listPrecious,
   type MemoryCandidateRow,
@@ -34,11 +34,15 @@ import {
   upsertGlossary,
   upsertMemoryByFactKey
 } from "../db/v2";
+import { parseJudgeNote, undoJudgeDecision } from "../memory/candidateJudge";
+import { isClefReviewOn } from "../memory/clefJudge";
 import { withImpressionDisclaimer } from "../memory/impression";
 import { isV2Enabled, runRecall } from "../memory/v2/recall";
 
 import type { Env, KeyProfile, MemoryApiRecord } from "../types";
 import { json, openAiError } from "../utils/json";
+import { getYesterdayDateLabel } from "../memory/dreamDates";
+import { formatDateLabel } from "../utils/time";
 import {
   readBoolean,
   readJsonObject,
@@ -117,7 +121,7 @@ async function handleCreateMemory(
     }
   }
 
-  let memory;
+  let memory: ReturnType<typeof toMemoryApiRecord>;
   try {
     const created = await createMemory(env.DB, {
       namespace: resolveNamespace(profile, body.namespace),
@@ -202,7 +206,7 @@ async function handleSearchMemories(request: Request, env: Env, profile: KeyProf
   const topK = readPositiveInt(body.top_k, Number(env.MEMORY_TOP_K || 50), 50);
   const types = readStringArray(body.types);
   const raw = await searchMemories(env, { namespace, query, topK, types });
-  const shouldFilter = readBoolean(body.filter, true);
+  const shouldFilter = readBoolean(body.filter, false);
   const filterResult = shouldFilter
     ? await filterAndCompressMemoriesWithMeta(env, { query, memories: raw })
     : null;
@@ -444,9 +448,15 @@ function toCandidateApiRecord(row: MemoryCandidateRow) {
   };
 }
 
-function yesterdayDateLabel(now = new Date()): string {
-  const date = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  return date.toISOString().slice(0, 10);
+function toJudgeDecisionRecord(row: MemoryCandidateRow) {
+  const note = parseJudgeNote(row.decision_note);
+  return {
+    ...toCandidateApiRecord(row),
+    judged_by: note?.judgedBy ?? null,
+    reason: note?.reason ?? row.decision_note,
+    undone: note?.undone ?? false,
+    undoable: note?.undoable ?? false
+  };
 }
 
 async function countMessagesInRange(
@@ -478,9 +488,9 @@ export async function handleMemoryBoot(request: Request, env: Env): Promise<Resp
   const scopeError = requireScope(auth.profile, "memory:read");
   if (scopeError) return scopeError;
 
-  const start = readString(url.searchParams.get("start")) || new Date().toISOString().slice(0, 10) + "T00:00:00.000Z";
+  const start = readString(url.searchParams.get("start")) || `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
   const end = readString(url.searchParams.get("end")) || new Date().toISOString();
-  const dailyDate = readString(url.searchParams.get("daily_date")) || yesterdayDateLabel();
+  const dailyDate = readString(url.searchParams.get("daily_date")) || getYesterdayDateLabel(readDiaryTimeZone(env));
   const [dailyLog, precious, glossary, todayMessages, todayRawCount, pendingCount, typeCounts] = await Promise.all([
     getDailyLog(env.DB, { namespace, date: dailyDate }),
     listPrecious(env.DB, { namespace, limit: 100 }),
@@ -512,15 +522,6 @@ export async function handleMemoryBoot(request: Request, env: Env): Promise<Resp
   });
 }
 
-function formatDateLabel(date: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(date);
-}
-
 function readDiaryTimeZone(env: Env): string {
   return env.DREAM_TIME_ZONE?.trim() || env.DAILY_DIGEST_TIME_ZONE?.trim() || "Asia/Singapore";
 }
@@ -539,7 +540,7 @@ export async function handleDiaryApi(request: Request, env: Env): Promise<Respon
 
   if (url.pathname === "/v1/diary/recent") {
     const today = formatDateLabel(new Date(), timeZone);
-    const yesterday = formatDateLabel(new Date(Date.now() - 24 * 60 * 60 * 1000), timeZone);
+    const yesterday = getYesterdayDateLabel(timeZone);
     const rows = await Promise.all([
       getDailyLog(env.DB, { namespace, date: today }),
       getDailyLog(env.DB, { namespace, date: yesterday })
@@ -761,16 +762,6 @@ async function createApprovedMemoryFromCandidate(
   return { id: created.id, action: "created" };
 }
 
-// E 轴保护撞到候选处置路径时，给 reviewer 一个可读的 409 而不是裸 500 (#33)。
-function handAuthoredConflict(error: unknown): Response | null {
-  if (!(error instanceof HandAuthoredProtectedError)) return null;
-  return openAiError(
-    "目标记忆是亲笔写入（E 轴保护），审核链只可提案、不可覆写。这条候选请选「丢弃」；确要更新原文，去重要记忆页亲手编辑或取代那条记忆。",
-    409,
-    "hand_authored_protected"
-  );
-}
-
 export async function handleMemoryCandidates(request: Request, env: Env): Promise<Response> {
   const auth = await authenticate(request, env);
   if (!auth.ok) return openAiError("Unauthorized", 401, "authentication_error");
@@ -792,6 +783,20 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
     return json({ data: rows.map(toCandidateApiRecord) });
   }
 
+  // 自动审核这几天替你定下的：GET /v1/candidates/decisions?days=7
+  if (request.method === "GET" && id === "decisions" && !action) {
+    const scopeError = requireScope(auth.profile, "memory:read");
+    if (scopeError) return scopeError;
+    const days = readPositiveInt(url.searchParams.get("days"), 7, 31);
+    const rows = await listJudgeDecisionsSince(env.DB, {
+      namespace,
+      sinceIso: new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString(),
+      limit: readPositiveInt(url.searchParams.get("limit"), 200, 500)
+    });
+    // auto_review 告诉审核页 clef 每天自动审开没开 (后台设置里的开关)。
+    return json({ data: rows.map(toJudgeDecisionRecord), auto_review: isClefReviewOn(env) ? "clef" : null });
+  }
+
   const scopeError = requireScope(auth.profile, "memory:write");
   if (scopeError) return scopeError;
   if (!id || request.method !== "POST") return openAiError("Not found", 404);
@@ -808,6 +813,19 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
   const sourceMessageIds = Array.isArray(body.source_message_ids)
     ? readStringArray(body.source_message_ids)
     : parseJsonArray(candidate.source_message_ids);
+
+  if (action === "undo") {
+    const result = await undoJudgeDecision(env, namespace, candidate);
+    if (!result.ok) return openAiError(result.error, result.httpStatus);
+    return json({
+      data: {
+        candidate: result.candidate ? toJudgeDecisionRecord(result.candidate) : null,
+        status: result.status,
+        memory_id: result.memoryId,
+        ...(result.restoredId ? { restored_id: result.restoredId } : {})
+      }
+    });
+  }
 
   if (action === "approve") {
     if (candidate.source === "dream_delete" && candidate.target_memory_id) {
@@ -835,26 +853,19 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
         target.status === "active" &&
         target.version_status !== "superseded";
       if (targetActive) {
-        let result;
-        try {
-          result = await supersedeMemory(env, {
-            namespace,
-            oldId: candidate.target_memory_id,
-            newContent: content,
-            newType: type,
-            newFactKey: factKey,
-            confidence,
-            importance,
-            tags,
-            source: "review",
-            sourceMessageIds,
-            reason: "approve_update"
-          });
-        } catch (error) {
-          const conflict = handAuthoredConflict(error);
-          if (conflict) return conflict;
-          throw error;
-        }
+        const result = await supersedeMemory(env, {
+          namespace,
+          oldId: candidate.target_memory_id,
+          newContent: content,
+          newType: type,
+          newFactKey: factKey,
+          confidence,
+          importance,
+          tags,
+          source: "review",
+          sourceMessageIds,
+          reason: "approve_update"
+        });
         const updated = await updateMemoryCandidateStatus(env.DB, {
           namespace,
           id,
@@ -876,25 +887,18 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
     const fallbackNote = candidate.target_memory_id
       ? `${readString(body.decision_note) || "approved"}; target_gone_fallback`
       : readString(body.decision_note) || "approved";
-    let approval;
-    try {
-      approval = await createApprovedMemoryFromCandidate(env, {
-        namespace,
-        type,
-        content,
-        factKey,
-        confidence,
-        importance,
-        tags,
-        sourceMessageIds,
-        source: "review",
-        excludeIds: candidate.target_memory_id ? [candidate.target_memory_id] : undefined
-      });
-    } catch (error) {
-      const conflict = handAuthoredConflict(error);
-      if (conflict) return conflict;
-      throw error;
-    }
+    const approval = await createApprovedMemoryFromCandidate(env, {
+      namespace,
+      type,
+      content,
+      factKey,
+      confidence,
+      importance,
+      tags,
+      sourceMessageIds,
+      source: "review",
+      excludeIds: candidate.target_memory_id ? [candidate.target_memory_id] : undefined
+    });
     const updated = await updateMemoryCandidateStatus(env.DB, {
       namespace,
       id,
@@ -954,26 +958,19 @@ export async function handleMemoryCandidates(request: Request, env: Env): Promis
   if (action === "supersede") {
     const oldId = readString(body.target_id);
     if (!oldId) return openAiError("target_id is required", 400);
-    let result;
-    try {
-      result = await supersedeMemory(env, {
-        namespace,
-        oldId,
-        newContent: content,
-        newType: type,
-        newFactKey: factKey,
-        confidence,
-        importance,
-        tags,
-        source: "review",
-        sourceMessageIds,
-        reason: readString(body.decision_note) || "candidate_supersede"
-      });
-    } catch (error) {
-      const conflict = handAuthoredConflict(error);
-      if (conflict) return conflict;
-      throw error;
-    }
+    const result = await supersedeMemory(env, {
+      namespace,
+      oldId,
+      newContent: content,
+      newType: type,
+      newFactKey: factKey,
+      confidence,
+      importance,
+      tags,
+      source: "review",
+      sourceMessageIds,
+      reason: readString(body.decision_note) || "candidate_supersede"
+    });
     const updated = await updateMemoryCandidateStatus(env.DB, {
       namespace,
       id,
@@ -1045,6 +1042,7 @@ async function handlePatchMemory(
 }
 
 async function handleDeleteMemory(
+  request: Request,
   env: Env,
   profile: KeyProfile,
   id: string
@@ -1052,25 +1050,27 @@ async function handleDeleteMemory(
   const scopeError = requireScope(profile, "memory:write");
   if (scopeError) return scopeError;
 
-  const existing = await getMemoryById(env.DB, { namespace: profile.namespace, id });
-  if (!existing || existing.namespace !== profile.namespace) {
+  const namespace = resolveNamespace(profile, new URL(request.url).searchParams.get("namespace"));
+  const existing = await getMemoryById(env.DB, { namespace, id });
+  if (!existing || existing.namespace !== namespace) {
     const deletedLegacyVector = await deleteVectorMemory(env, id);
     if (deletedLegacyVector) return json({ data: { id, deleted: true, source: "legacy_vectorize" } });
     return openAiError("Memory not found", 404);
   }
 
-  const deleted = await softDeleteMemory(env.DB, { namespace: profile.namespace, id });
+  const deleted = await softDeleteMemory(env.DB, { namespace, id });
   if (deleted) await deleteMemoryEmbeddingBestEffort(env, deleted);
   return json({ data: { id: existing.id, vector_id: existing.vector_id, deleted: true } });
 }
 
-async function handleGetMemory(env: Env, profile: KeyProfile, id: string): Promise<Response> {
+async function handleGetMemory(request: Request, env: Env, profile: KeyProfile, id: string): Promise<Response> {
   const scopeError = requireScope(profile, "memory:read");
   if (scopeError) return scopeError;
 
-  const memory = await getMemoryById(env.DB, { namespace: profile.namespace, id });
+  const namespace = resolveNamespace(profile, new URL(request.url).searchParams.get("namespace"));
+  const memory = await getMemoryById(env.DB, { namespace, id });
 
-  if (!memory || memory.namespace !== profile.namespace) return openAiError("Memory not found", 404);
+  if (!memory || memory.namespace !== namespace) return openAiError("Memory not found", 404);
   return json({ data: toMemoryApiRecord(memory) });
 }
 
@@ -1112,9 +1112,9 @@ export async function handleMemories(request: Request, env: Env, ctx: ExecutionC
 
   if (tail.length === 1) {
     const id = tail[0];
-    if (request.method === "GET") return handleGetMemory(env, auth.profile, id);
+    if (request.method === "GET") return handleGetMemory(request, env, auth.profile, id);
     if (request.method === "PATCH") return handlePatchMemory(request, env, auth.profile, id);
-    if (request.method === "DELETE") return handleDeleteMemory(env, auth.profile, id);
+    if (request.method === "DELETE") return handleDeleteMemory(request, env, auth.profile, id);
   }
 
   return openAiError("Not found", 404);

@@ -8,10 +8,10 @@ import {
   handleWeeklyApproveAdmin
 } from "./api/admin";
 import { handleHealth } from "./api/health";
-import { handleVectorDoctor, handleVectorHealth, handleVectorReindex } from "./api/debug";
+import { handleVectorBackfill, handleVectorDoctor, handleVectorHealth, handleVectorReindex } from "./api/debug";
 import { handleDreamHarvest, handleDreamRun, handleDreamStatus } from "./api/dream";
 import { handleGateway } from "./gateway/handler";
-import { handleGatewayAdmin, handleGatewayEnv, gatewayAdminPage } from "./gateway/admin";
+import { handleGatewayAdmin, handleGatewayEnv, handleRecallHistory } from "./gateway/admin";
 import { identityNamespace, loadConfig, loadSettings, type Protocol } from "./gateway/config";
 import { applySettings } from "./gateway/settings";
 import { handleGuideDogChatCompletions } from "./api/guideDog";
@@ -33,6 +33,7 @@ import { handleRuntimeStatus } from "./api/runtimeStatus";
 import { runCandidateJudge } from "./memory/candidateJudge";
 import { runDailyMemoryDigest, runDreamBackfill } from "./memory/dailyDigest";
 import { backfillFts } from "./memory/fts";
+import { runVectorBackfill } from "./memory/vectorBackfill";
 import {
   runDiaryTrigger,
   runGithubDailyTrigger,
@@ -92,10 +93,12 @@ export default {
   async fetch(request: Request, deployed: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/admin/gateway") return gatewayAdminPage();
+    if (request.method === "GET" && url.pathname === "/admin/gateway") return new Response(null, { status: 302, headers: { location: "/admin", "cache-control": "no-store" } });
     // The admin endpoints report and edit the deployed values, so they run before the overrides.
     if (url.pathname === "/api/gateway/config") return handleGatewayAdmin(request, deployed);
     if (request.method === "GET" && url.pathname === "/api/gateway/env") return handleGatewayEnv(request, deployed);
+
+    if (request.method === "GET" && url.pathname === "/api/gateway/recalls") return handleRecallHistory(request, deployed);
 
     const env = applySettings(deployed, await loadSettings(deployed));
 
@@ -216,6 +219,10 @@ export default {
       return handleVectorDoctor(request, env);
     }
 
+    if (request.method === "POST" && url.pathname === "/v1/vector-backfill") {
+      return handleVectorBackfill(request, env);
+    }
+
     if (request.method === "GET" && url.pathname === "/admin/dream/harvest") {
       return handleDreamHarvest(request, env);
     }
@@ -322,6 +329,27 @@ export default {
                 error: error instanceof Error ? error.message : String(error)
               });
               results.push({ type: "fts_backfill", result: { ok: false, error: String(error) } });
+            }
+
+            // 有记忆没向量的 (直接写 D1 的、embedding 当时失败的) 每天自动补一轮，每轮最多 50 条。
+            try {
+              const report = await runVectorBackfill(env, { namespace, dryRun: false, limit: 50 });
+              results.push({
+                type: "vector_backfill",
+                result: {
+                  active_memories: report.active_memories,
+                  counts: report.counts,
+                  unchecked: report.unchecked,
+                  repair: report.repair && { ...report.repair, failed: report.repair.failed.slice(0, 10) },
+                  errors: report.errors
+                }
+              });
+            } catch (error) {
+              console.error("scheduled vector backfill failed", {
+                namespace,
+                error: error instanceof Error ? error.message : String(error)
+              });
+              results.push({ type: "vector_backfill", result: { ok: false, error: String(error) } });
             }
 
             let weeklyRollup: Awaited<ReturnType<typeof runWeeklyRollupTrigger>> | undefined;

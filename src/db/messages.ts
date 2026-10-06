@@ -3,6 +3,7 @@ import type { MessageRecord, OpenAIChatMessage, TokenUsage } from "../types";
 import { sha256Hex } from "../utils/hash";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
+import { cleanMessageText } from "../utils/sanitize";
 
 export const MESSAGE_ORDER_SQL =
   "created_at ASC, seq ASC, CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC, id ASC";
@@ -47,7 +48,7 @@ export async function saveUserMessages(
   const ids: string[] = [];
 
   for (const message of userMessages) {
-    const content = contentToText(message.content);
+    const content = cleanMessageText(contentToText(message.content));
     const id = newId("msg");
     // 10-minute time bucket: conversations are eternal (`${namespace}:default`),
     // so content-only hashes would collide on every legitimate repeat of the same
@@ -84,7 +85,7 @@ export async function saveUserMessages(
     // Duplicate hash (client retry): return the existing row id so callers still get a valid message id.
     if ((result.meta.changes ?? 0) === 0) {
       const existing = await db
-        .prepare(`SELECT id FROM messages WHERE client_message_hash = ? LIMIT 1`)
+        .prepare("SELECT id FROM messages WHERE client_message_hash = ? LIMIT 1")
         .bind(hash)
         .first<{ id: string }>();
       ids.push(existing?.id ?? id);
@@ -213,7 +214,7 @@ export async function listMessagesByNamespace(
   const binds: unknown[] = [namespace];
 
   if (afterCreatedAt) {
-    sql += ` AND created_at > ?`;
+    sql += " AND created_at > ?";
     binds.push(afterCreatedAt);
   }
 
@@ -283,7 +284,7 @@ export async function saveIngestMessages(
   let seq = 0;
 
   for (const message of input.messages) {
-    const content = contentToText(message.content);
+    const content = cleanMessageText(contentToText(message.content));
     if (!content) continue;
 
     const id = newId("msg");

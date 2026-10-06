@@ -1,5 +1,5 @@
 import type { Env, MemoryApiRecord } from "../types";
-import { sanitizeSummaryContent } from "../utils/sanitize";
+import { cleanMessageText } from "../utils/sanitize";
 
 const DEFAULT_WORKERS_AI_RERANKER_MODEL = "workers-ai/@cf/baai/bge-reranker-base";
 
@@ -52,13 +52,20 @@ function getMaxCandidates(env: Env): number {
 }
 
 function getMaxOutput(env: Env): number {
-  const value = Number(env.MEMORY_FILTER_MAX_OUTPUT ?? 3);
-  return Number.isFinite(value) ? clamp(Math.floor(value), 0, 20) : 3;
+  const value = Number(env.MEMORY_FILTER_MAX_OUTPUT ?? 2);
+  return Number.isFinite(value) ? clamp(Math.floor(value), 0, 20) : 2;
+}
+
+function resolveMaxOutput(env: Env, override?: number): number {
+  if (typeof override === "number" && Number.isFinite(override)) {
+    return clamp(Math.floor(override), 0, 100);
+  }
+  return getMaxOutput(env);
 }
 
 function getMaxContentChars(env: Env): number {
-  const value = Number(env.MEMORY_FILTER_MAX_CONTENT_CHARS || 700);
-  return Number.isFinite(value) ? clamp(Math.floor(value), 120, 3000) : 700;
+  const value = Number(env.MEMORY_FILTER_MAX_CONTENT_CHARS || 240);
+  return Number.isFinite(value) ? clamp(Math.floor(value), 80, 3000) : 240;
 }
 
 export function recallInjectionBudget(env: Env): { maxItems: number; maxChars: number } {
@@ -84,7 +91,7 @@ function normalizeForDedupe(text: string): string {
 function prepareCandidates(env: Env, memories: MemoryApiRecord[]): MemoryApiRecord[] {
   const minScore = getFilterMinScore(env);
   const eligible = memories.flatMap((memory): MemoryApiRecord[] => {
-    const content = sanitizeSummaryContent(memory.content);
+    const content = cleanMessageText(memory.content);
     if (!content) return [];
     if (!memory.pinned && typeof memory.score === "number" && memory.score < minScore) return [];
     return [{ ...memory, content }];
@@ -125,8 +132,8 @@ function readRerankerResponse(value: unknown): Array<{ id: number; score: number
   for (const row of rows) {
     if (!row || typeof row !== "object") continue;
     const item = row as { id?: unknown; index?: unknown; score?: unknown };
-    const id = typeof item.id === "number" ? item.id : typeof item.index === "number" ? item.index : NaN;
-    const score = typeof item.score === "number" ? item.score : NaN;
+    const id = typeof item.id === "number" ? item.id : typeof item.index === "number" ? item.index : Number.NaN;
+    const score = typeof item.score === "number" ? item.score : Number.NaN;
     if (Number.isInteger(id) && Number.isFinite(score)) result.push({ id, score });
   }
 
@@ -211,7 +218,7 @@ async function rerankMemories(
 
 export async function filterAndCompressMemories(
   env: Env,
-  input: { query: string; memories: MemoryApiRecord[] }
+  input: { query: string; memories: MemoryApiRecord[]; maxOutput?: number }
 ): Promise<MemoryApiRecord[]> {
   const result = await filterAndCompressMemoriesWithMeta(env, input);
   return result.data;
@@ -231,7 +238,7 @@ function buildFailOpenResult(
 
 export async function filterAndCompressMemoriesWithMeta(
   env: Env,
-  input: { query: string; memories: MemoryApiRecord[] }
+  input: { query: string; memories: MemoryApiRecord[]; maxOutput?: number }
 ): Promise<{ data: MemoryApiRecord[]; meta: MemoryFilterMeta }> {
   const query = input.query.trim();
   const model = getRerankerModel(env);
@@ -254,7 +261,7 @@ export async function filterAndCompressMemoriesWithMeta(
     };
   }
 
-  const maxOutput = getMaxOutput(env);
+  const maxOutput = resolveMaxOutput(env, input.maxOutput);
   if (maxOutput === 0) {
     return {
       data: [],

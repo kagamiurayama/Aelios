@@ -91,24 +91,17 @@ export async function listActiveFactKeys(
 // =====================================================================
 
 // =====================================================================
-// LMC-5 E 轴写入闸 (0011)。
+// LMC-5 E 轴署名 (0011)。
 // authored_by / response_tendency 只许"亲手"来源写：mcp (旦九的手)、manual、api。
-// 蒸馏链 (dream/judge/extract/supersede 默认值等) 一律禁写这两列；
-// 且亲笔记忆 (authored_by 非空) 禁止被蒸馏链改写内容——撞上直接抛错，
-// 调用方 (dream/judge 每条独立 try/catch) 记失败跳过，亲笔原文保住。
+// 蒸馏链 (dream/judge/extract/review/supersede 默认值等) 不能给记忆署名，但可以改写亲笔记忆；
+// 改写时署名和响应倾向沿用旧条，亲笔加成跟着走。(原先的"亲笔不许蒸馏链改写"保护已拆掉：
+// 审核时批不进去、只能逐条丢弃，太麻烦。)
 // =====================================================================
 
 const HAND_AUTHOR_SOURCES = new Set(["mcp", "manual", "api", "remember_now"]);
 
 export function isHandAuthorSource(source: string | null | undefined): boolean {
   return typeof source === "string" && HAND_AUTHOR_SOURCES.has(source);
-}
-
-export class HandAuthoredProtectedError extends Error {
-  constructor(id: string) {
-    super(`memory ${id} is hand-authored (E-axis); automated writers may propose but not overwrite`);
-    this.name = "HandAuthoredProtectedError";
-  }
 }
 
 // 按来源裁剪 E 轴字段：非亲手来源写入时两列强制 null。
@@ -195,13 +188,9 @@ export async function upsertMemoryByFactKey(
     .first<{ id: string; authored_by: string | null; response_tendency: string | null }>();
 
   if (existing) {
-    // E 轴保护：亲笔记忆不接受蒸馏链改写 (dream/judge 的候选路径可提案，落笔归人)。
-    if (existing.authored_by && !handSource) {
-      throw new HandAuthoredProtectedError(existing.id);
-    }
     // 更新 memories 本体 (v1 列 + LMC-5 fact_key/version_status)。
     // E 轴两列只在亲手来源时更新；不传就继承已有值 (亲手改内容不该抹掉旧署名)，
-    // 与 supersede 的继承原则一致。蒸馏链更新一条无主记忆时不碰它们 (保持 null)。
+    // 与 supersede 的继承原则一致。蒸馏链改写时不碰它们 (亲笔的沿用署名，无主的保持 null)。
     await db
       .prepare(
         `UPDATE memories SET content = ?, type = ?, importance = ?, confidence = ?,
@@ -302,7 +291,7 @@ export async function resolveMemoryFactKey(
 ): Promise<string | null> {
   const row = await env.DB
     .prepare(
-      `SELECT m.fact_key, m.namespace, m.status, m.version_status FROM memories m WHERE m.id = ?`
+      "SELECT m.fact_key, m.namespace, m.status, m.version_status FROM memories m WHERE m.id = ?"
     )
     .bind(id)
     .first<{
@@ -316,7 +305,7 @@ export async function resolveMemoryFactKey(
   if (row.status !== "active" || row.version_status === "superseded") return null;
   if (row.fact_key) return row.fact_key;
   const lifecycle = await env.DB
-    .prepare(`SELECT fact_key FROM memory_lifecycle WHERE memory_id = ?`)
+    .prepare("SELECT fact_key FROM memory_lifecycle WHERE memory_id = ?")
     .bind(id)
     .first<{ fact_key: string | null }>();
   return lifecycle?.fact_key ?? null;
@@ -406,7 +395,6 @@ export async function supersedeMemory(
   // 注意：supersede 的 source 默认值是 "supersede" (非亲手)，
   // 亲手 supersede 必须显式传 source:"mcp"/"manual"/"api" 才能带 E 轴字段。
   const effectiveSource = input.source ?? "supersede";
-  const handSource = isHandAuthorSource(effectiveSource);
   const eAxis = eAxisFieldsForWrite({
     source: effectiveSource,
     authoredBy: input.authoredBy,
@@ -414,7 +402,7 @@ export async function supersedeMemory(
   });
   const old = await db
     .prepare(
-      `SELECT id, status, vector_id, fact_key, type, authored_by, response_tendency FROM memories WHERE namespace = ? AND id = ?`
+      "SELECT id, status, vector_id, fact_key, type, authored_by, response_tendency FROM memories WHERE namespace = ? AND id = ?"
     )
     .bind(input.namespace, input.oldId)
     .first<{
@@ -426,11 +414,6 @@ export async function supersedeMemory(
       authored_by: string | null;
       response_tendency: string | null;
     }>();
-
-  // E 轴保护：亲笔记忆不许被蒸馏链 supersede (dream/judge 撞上抛错，各自的 per-item catch 会记失败跳过)。
-  if (old?.authored_by && !handSource) {
-    throw new HandAuthoredProtectedError(old.id);
-  }
 
   const nextId = newId("mem");
   const nextVectorId = `mem_${nextId}`;
@@ -509,17 +492,15 @@ export async function supersedeMemory(
     .run();
   await db
     .prepare(
-      `UPDATE memory_lifecycle SET superseded_by_id = ?, review_reason = ? WHERE memory_id = ?`
+      "UPDATE memory_lifecycle SET superseded_by_id = ?, review_reason = ? WHERE memory_id = ?"
     )
     .bind(nextId, input.reason ?? null, old.id)
     .run();
 
   // 2. 插新条目 (current，继承 fact_key)。
-  //    亲手 supersede 亲笔记忆时，新条 E 轴取显式入参；没传则继承旧条 (亲笔链不断，倾向同理)。
-  const nextAuthoredBy = handSource ? (eAxis.authoredBy ?? old.authored_by) : null;
-  const nextResponseTendency = handSource
-    ? (eAxis.responseTendency ?? old.response_tendency)
-    : null;
+  //    新条 E 轴取显式入参 (只有亲手来源能传)；没传则继承旧条 (亲笔链不断，倾向同理)。
+  const nextAuthoredBy = eAxis.authoredBy ?? old.authored_by;
+  const nextResponseTendency = eAxis.responseTendency ?? old.response_tendency;
   await db
     .prepare(
       `INSERT INTO memories (
@@ -610,13 +591,13 @@ export async function markMemoriesUnderReview(
     if (input.reason) {
       await db
         .prepare(
-          `INSERT OR IGNORE INTO memory_lifecycle (memory_id, namespace, seen_count) VALUES (?, ?, 0)`
+          "INSERT OR IGNORE INTO memory_lifecycle (memory_id, namespace, seen_count) VALUES (?, ?, 0)"
         )
         .bind(id, input.namespace)
         .run();
       await db
         .prepare(
-          `UPDATE memory_lifecycle SET review_reason = ? WHERE memory_id = ? AND namespace = ?`
+          "UPDATE memory_lifecycle SET review_reason = ? WHERE memory_id = ? AND namespace = ?"
         )
         .bind(input.reason, id, input.namespace)
         .run();
@@ -652,6 +633,75 @@ export async function archiveMemory(
       console.error("v2 vector delete (archive) failed", { id: input.id, error });
     }
   }
+  return true;
+}
+
+// 能不能把一条记忆放回 active：状态得对得上 (归档的；或被 supersededBy 顶掉的旧版本)，
+// 而且同一 fact_key 下没有别的现行版本，否则放回来就是两条重复的现行事实。
+export async function checkMemoryRestorable(
+  db: D1Database,
+  input: { namespace: string; id: string; supersededBy?: string }
+): Promise<{ content: string } | null> {
+  const row = await db
+    .prepare(
+      `SELECT m.status, m.content, m.superseded_by, COALESCE(m.fact_key, lc.fact_key) AS fact_key
+       FROM memories m
+       LEFT JOIN memory_lifecycle lc ON lc.memory_id = m.id
+       WHERE m.namespace = ? AND m.id = ?`
+    )
+    .bind(input.namespace, input.id)
+    .first<{ status: string; content: string; superseded_by: string | null; fact_key: string | null }>();
+  if (!row) return null;
+  const stateOk = input.supersededBy
+    ? row.status === "superseded" && row.superseded_by === input.supersededBy
+    : row.status === "archived";
+  if (!stateOk) return null;
+  if (row.fact_key) {
+    const other = await db
+      .prepare(
+        `SELECT m.id FROM memories m
+         LEFT JOIN memory_lifecycle lc ON lc.memory_id = m.id
+         WHERE m.namespace = ? AND m.status = 'active'
+           AND (m.version_status IS NULL OR m.version_status IN ('current', 'under_review'))
+           AND (m.fact_key = ? OR (m.fact_key IS NULL AND lc.fact_key = ?))
+           AND m.id != ? AND m.id != ?
+         LIMIT 1`
+      )
+      .bind(input.namespace, row.fact_key, row.fact_key, input.id, input.supersededBy ?? input.id)
+      .first<{ id: string }>();
+    if (other) return null;
+  }
+  return { content: row.content };
+}
+
+// restore: 把记忆放回 active (条件见 checkMemoryRestorable)，再补回向量和全文索引。
+// 对不上就不动，返回 false。
+export async function restoreMemory(
+  env: Env,
+  input: { namespace: string; id: string; supersededBy?: string }
+): Promise<boolean> {
+  const db = env.DB;
+  const restorable = await checkMemoryRestorable(db, input);
+  if (!restorable) return false;
+
+  await db
+    .prepare(
+      `UPDATE memories
+       SET status = 'active',
+           version_status = CASE WHEN version_status = 'superseded' THEN 'current' ELSE version_status END,
+           superseded_by = NULL, updated_at = ?
+       WHERE namespace = ? AND id = ?`
+    )
+    .bind(nowIso(), input.namespace, input.id)
+    .run();
+  if (input.supersededBy) {
+    await db
+      .prepare("UPDATE memory_lifecycle SET superseded_by_id = NULL WHERE memory_id = ?")
+      .bind(input.id)
+      .run();
+  }
+  await syncMemoryVector(env, { namespace: input.namespace, id: input.id });
+  await upsertMemoryFts(env.DB, { namespace: input.namespace, memoryId: input.id, content: restorable.content });
   return true;
 }
 

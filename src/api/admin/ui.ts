@@ -193,6 +193,18 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
   .chip-dim { color: var(--text-4); }
   .chip-aurora { border-color: rgba(139, 124, 246, .45); color: var(--violet); }
 
+  /* 设置页的开关 */
+  .switch {
+    position: relative; flex-shrink: 0; width: 44px; height: 26px; border-radius: 999px;
+    border: 1px solid var(--panel-border); background: var(--hover-bg); transition: background-color .15s ease, border-color .15s ease;
+  }
+  .switch > span {
+    position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 999px;
+    background: var(--text-4); transition: transform .15s ease, background-color .15s ease;
+  }
+  .switch.is-on { background: var(--coral); border-color: var(--coral); }
+  .switch.is-on > span { transform: translateX(18px); background: var(--on-accent); }
+
   /* ===== 梦境观测台 ===== */
   .dream-stat { position: relative; }
   .dream-stat::before {
@@ -253,6 +265,15 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
         </div>
       </div>
 
+      <button type="button" @click="spaceOpen = true" class="tap flex items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-left transition duration-150 ease-in-out hover:border-coral" aria-label="查看谁的记忆">
+        <i data-lucide="users" class="h-4 w-4 shrink-0 text-zinc-400"></i>
+        <span class="min-w-0 flex-1">
+          <span class="block text-[11px] text-zinc-500">查看谁的记忆</span>
+          <span class="block truncate text-sm text-zinc-100" :class="identityLoadError ? 'text-coral' : ''" x-text="viewingLabel()"></span>
+        </span>
+        <i data-lucide="chevrons-up-down" class="h-4 w-4 shrink-0 text-zinc-500"></i>
+      </button>
+
       <nav class="grid gap-1">
         <template x-for="item in nav" :key="item.id">
           <button type="button" @click="go(item.id)" class="tap flex items-center gap-3 rounded-2xl px-3 text-left text-sm transition duration-150 ease-in-out" :class="page === item.id ? 'bg-zinc-900 text-zinc-100 ring-1 ring-zinc-800' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'">
@@ -282,8 +303,6 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
           </button>
         </div>
         <div class="mt-1 text-[11px]" :class="tokenSaved() ? 'text-zinc-500' : 'text-coral'" x-text="tokenSaved() ? 'Token 已保存到本机' : 'Token 尚未保存'"></div>
-        <label class="mt-3 block text-xs text-zinc-400">Namespace</label>
-        <input x-model="namespace" @change="reloadAll()" class="mt-2 h-11 w-full rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm text-zinc-100 outline-none transition duration-150 ease-in-out focus:border-coral" placeholder="default">
       </div>
     </aside>
 
@@ -296,12 +315,20 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
             <div class="text-xs text-zinc-400" x-text="subtitle()"></div>
           </div>
         </div>
-        <button type="button" @click="reloadAll()" class="tap rounded-2xl border border-zinc-800 bg-zinc-900 px-3 text-zinc-100 transition duration-150 ease-in-out active:bg-zinc-800" aria-label="刷新">
-          <i data-lucide="refresh-cw" class="h-4 w-4"></i>
-        </button>
+        <div class="flex min-w-0 items-center gap-2">
+          <button type="button" @click="spaceOpen = true" class="tap flex min-w-0 max-w-[11rem] items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 transition duration-150 ease-in-out active:bg-zinc-800" aria-label="查看谁的记忆">
+            <i data-lucide="users" class="h-4 w-4 shrink-0 text-zinc-400"></i>
+            <span class="truncate" :class="identityLoadError ? 'text-coral' : ''" x-text="viewingLabel()"></span>
+            <i data-lucide="chevron-down" class="h-4 w-4 shrink-0 text-zinc-500"></i>
+          </button>
+          <button type="button" @click="reloadAll()" class="tap rounded-2xl border border-zinc-800 bg-zinc-900 px-3 text-zinc-100 transition duration-150 ease-in-out active:bg-zinc-800" aria-label="刷新">
+            <i data-lucide="refresh-cw" class="h-4 w-4"></i>
+          </button>
+        </div>
       </header>
 
       <div x-show="toast" x-transition.opacity.duration.150ms class="fixed left-4 right-4 top-4 z-50 rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 shadow-sm md:left-auto md:right-6 md:w-96" x-text="toast"></div>
+
 
       <section x-show="page === 'today'" class="space-y-4">
         <div class="hidden items-center justify-between gap-4 md:flex">
@@ -358,6 +385,8 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
           <div class="min-w-0 flex-1">
             <h1 class="text-2xl font-semibold">审核队列</h1>
             <p class="mt-1 text-sm text-zinc-400">低置信候选先过手，再进入长期记忆。</p>
+            <p x-show="autoReview === 'clef'" class="mt-1 text-xs leading-6 text-zinc-500">clef 每天夜里自动审，队列里这些下一轮会被定掉，不用一条条批。</p>
+            <p x-show="autoReview !== 'clef'" class="mt-1 text-xs leading-6 text-zinc-500">嫌一条条批累：<button type="button" @click="go('settings')" class="text-coral underline-offset-2 hover:underline">去设置</button>打开「每天用 clef 自动审候选」。</p>
           </div>
           <span class="rounded-full bg-coral px-3 py-1 text-sm font-semibold text-zinc-950" x-text="pendingCount"></span>
         </div>
@@ -412,6 +441,31 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
             <div x-show="candidate.mergeOpen" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
               <input x-model="candidate.target_id" class="h-11 rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm outline-none focus:border-coral" placeholder="目标 memory id">
               <button type="button" @click="mergeCandidate(candidate)" class="tap rounded-2xl border border-zinc-800 px-4 text-sm transition duration-150 ease-in-out hover:border-coral">确认合并</button>
+            </div>
+          </article>
+        </template>
+
+        <div class="pt-4">
+          <h2 class="text-lg font-semibold">这周自动定下的</h2>
+          <p class="mt-1 text-sm text-zinc-400">助手自己判的和 clef 审的只分记住和放下，不进上面的队列。觉得不对就撤回：记住的收回，放下的补记。</p>
+        </div>
+        <template x-if="judgeDecisions.length === 0">
+          <div class="text-keep w-full rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400">这 7 天没有自动决定。</div>
+        </template>
+        <template x-for="item in judgeDecisions" :key="item.id">
+          <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
+            <div class="mb-2 flex flex-wrap items-center gap-2 text-xs">
+              <span class="chip" :class="item.undone ? 'chip-dim' : (item.status === 'approved' ? 'chip-ok' : 'chip-dim')" x-text="judgeDecisionLabel(item)"></span>
+              <span class="chip chip-dim" x-text="dreamCandidateSourceLabel(item.source)"></span>
+              <span class="text-zinc-500" x-text="item.type"></span>
+              <span class="ml-auto text-zinc-500" x-text="fmt(item.updated_at)"></span>
+            </div>
+            <p class="whitespace-pre-wrap text-sm leading-7 text-zinc-100" x-text="item.content"></p>
+            <p x-show="item.reason" class="mt-1 text-xs leading-6 text-zinc-400" x-text="item.reason"></p>
+            <div x-show="item.undoable" class="mt-3">
+              <button type="button" @click="undoJudgeDecision(item)" class="tap inline-flex items-center justify-center gap-2 rounded-2xl border border-zinc-800 px-4 text-sm text-zinc-100 transition duration-150 ease-in-out hover:border-coral">
+                <i data-lucide="undo-2" class="h-4 w-4"></i><span x-text="judgeUndoLabel(item)"></span>
+              </button>
             </div>
           </article>
         </template>
@@ -648,10 +702,12 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
 
         <div x-show="moreView === 'maintenance'" class="space-y-3">
           <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
-            <div class="grid gap-3 md:grid-cols-[1fr_auto_auto_auto]">
-              <input x-model="namespace" @change="reloadAll()" class="h-11 rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm outline-none focus:border-coral" placeholder="namespace">
+            <div class="grid gap-3 md:grid-cols-[1fr_auto_auto_auto_auto_auto]">
+              <div class="self-center text-sm text-zinc-400">当前空间：<span x-text="namespace"></span></div>
               <button type="button" @click="runHealth()" class="tap rounded-2xl border border-zinc-800 px-4 text-sm hover:border-coral">vector_health</button>
               <button type="button" @click="runReindex(true)" class="tap rounded-2xl border border-zinc-800 px-4 text-sm hover:border-coral">reindex dry</button>
+              <button type="button" @click="runBackfill(true)" class="tap rounded-2xl border border-zinc-800 px-4 text-sm hover:border-coral">查缺向量</button>
+              <button type="button" @click="runBackfill(false)" class="tap rounded-2xl border border-zinc-800 px-4 text-sm hover:border-coral">补缺向量</button>
               <button type="button" @click="runDream()" class="tap rounded-2xl bg-coral px-4 text-sm font-semibold text-zinc-950">dream force</button>
             </div>
           </article>
@@ -987,6 +1043,35 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
       <section x-show="page === 'settings'" class="space-y-4">
         <h1 class="text-2xl font-semibold">设置</h1>
         <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold">为什么想起这件事</h2>
+            <button type="button" @click="loadRecallHistory()" :disabled="recallHistoryLoading || !selectedIdentity" class="tap rounded-2xl border border-zinc-800 px-3 text-xs disabled:opacity-40">刷新记录</button>
+          </div>
+          <p class="mt-2 text-xs text-zinc-400">查看所选助手最近 20 次召回，记录按助手区分，不随单个召回空间合并。</p>
+          <p x-show="!selectedIdentity" class="mt-2 text-xs text-zinc-400">请先点「查看谁的记忆」选一位助手。</p>
+          <div aria-live="polite">
+            <p x-show="recallHistoryLoading" class="mt-2 text-xs text-zinc-400">读取中…</p>
+            <p x-show="recallHistoryError" class="mt-2 text-xs text-coral" x-text="recallHistoryError"></p>
+            <p x-show="selectedIdentity && !recallHistoryLoading && !recallHistoryError && !recallHistory.length" class="mt-2 text-xs text-zinc-500">还没有召回记录。</p>
+          </div>
+          <template x-for="record in recallHistory" :key="record.id">
+            <details class="mt-3 rounded-xl border border-zinc-800 p-3">
+              <summary class="cursor-pointer text-sm" x-text="record.query || '本轮召回'"></summary>
+              <p class="mt-2 text-xs text-zinc-400" x-text="fmt(record.created_at) + ' · ' + recallStatusLabel(record.selection && record.selection.status) + ' · 注入 ' + (record.injected || 0) + ' 条'"></p>
+              <p class="mt-1 text-xs text-zinc-400" x-text="recallReasonLabel(record.selection && record.selection.reason)"></p>
+              <p class="mt-1 text-xs text-zinc-400" x-show="record.selection && record.selection.threshold != null" x-text="record.selection ? '分数下限 ' + record.selection.threshold + (record.selection.elapsed_ms != null ? ' · 重排与筛选 ' + record.selection.elapsed_ms + ' ms' : '') + ' · 分数不是正确率' : ''"></p>
+              <template x-for="(decision, i) in (record.decisions || [])" :key="i">
+                <div class="mt-2 border-t border-zinc-800 pt-2">
+                  <p class="text-xs" :class="decision.injected ? 'text-coral' : 'text-zinc-400'" x-text="(decision.injected ? '已选 · ' : '未选 · ') + recallReasonLabel(decision.reason)"></p>
+                  <p class="mt-1 text-xs text-zinc-400" x-show="decision.score != null" x-text="decision.score != null ? '相关分数 ' + Number(decision.score).toFixed(3) : ''"></p>
+                  <p class="mt-1 whitespace-pre-wrap text-sm" x-text="decision.excerpt || ''"></p>
+                  <p class="mt-1 break-all text-[11px] text-zinc-500" x-text="(decision.namespace || '') + ' / ' + (decision.id || decision.kind || '')"></p>
+                </div>
+              </template>
+            </details>
+          </template>
+        </article>
+        <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
           <button type="button" @click="toggleTheme()" class="tap mb-4 inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-4 text-sm text-zinc-100 transition duration-150 ease-in-out hover:border-coral">
             <i :data-lucide="theme === 'light' ? 'moon' : 'sun'" class="h-4 w-4"></i>
             <span x-text="theme === 'light' ? '切到夜间模式' : '切到白天模式'"></span>
@@ -1004,8 +1089,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
             </button>
           </div>
           <div class="mt-1 text-[11px]" :class="tokenSaved() ? 'text-zinc-500' : 'text-coral'" x-text="tokenSaved() ? 'Token 已保存到本机' : 'Token 尚未保存'"></div>
-          <label class="mt-4 block text-xs text-zinc-400">Namespace</label>
-          <input x-model="namespace" @change="reloadAll()" class="mt-2 h-11 w-full rounded-2xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm outline-none focus:border-coral" placeholder="default">
+          <p class="mt-4 text-xs text-zinc-400">切换助手和空间：电脑在左侧栏，手机在顶栏，点「查看谁的记忆」。</p>
         </article>
         <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
           <div class="flex items-center justify-between gap-2">
@@ -1022,13 +1106,18 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
             <label class="text-xs text-zinc-400">助手</label>
             <button type="button" @click="gwAdd()" class="tap rounded-2xl border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 transition duration-150 ease-in-out hover:border-coral hover:text-zinc-100">+ 添加助手</button>
           </div>
-          <p class="mt-1 text-[11px] text-zinc-500">名字即地址路径段;主模型支持 * 通配,只有主模型有记忆、进 Dream。</p>
+          <p class="mt-1 text-[11px] text-zinc-500">名字即地址路径段;主模型支持 * 通配,只有主模型有记忆、进 Dream。用户名和助手名给 Dream、日记、周月卷、审核写记忆用,只许写名字,不许写用户/助手。在「查看谁的记忆」里选中助手后也能填。</p>
           <template x-for="(idn, i) in gwIdentities" :key="i">
             <div class="mt-2 space-y-2 rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-3">
               <div class="flex items-center gap-2">
                 <input x-model="idn.slug" class="h-10 min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="名字,如 coder">
                 <button type="button" @click="gwIdentities.splice(i, 1)" class="tap shrink-0 rounded-xl border border-zinc-800 px-3 py-2 text-xs text-zinc-500 transition hover:border-coral hover:text-zinc-100">移除</button>
               </div>
+              <div class="grid grid-cols-2 gap-2">
+                <input x-model="idn.userName" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="用户叫什么,如 小南">
+                <input x-model="idn.assistantName" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="助手叫什么,如 小北">
+              </div>
+              <p class="text-[11px] text-zinc-500">Dream、日记、周月卷、审核写记忆只用这两个名字。助手名留空则用路径名。在「查看谁的记忆」里选中助手后也能填。</p>
               <input x-model="idn.modelsText" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="主模型,逗号分隔,如 anthropic/claude-opus-5, *fable*">
               <input x-model="idn.namespace" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="写入空间,留空与名字同名">
               <input x-model="idn.readNamespacesText" class="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="召回空间,逗号分隔;留空只读写入空间;[] 不召回">
@@ -1045,9 +1134,13 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
                   <option value="passthrough">原样透传(思考开着时跳过注入)</option>
                   <option value="drop_block">临时记忆 + 上游丢弃失配思考(需 beta)</option>
                 </select>
-                <label class="mt-2 flex items-center gap-1.5 text-xs text-zinc-400"><input type="checkbox" x-model="idn.autoCache" class="h-4 w-4 accent-[#f4a07c]"><span>自动缓存断点(客户端不带时由网关补,如 rikkahub)</span></label>
                 <label class="mt-2 block text-xs text-zinc-400">单次记忆字数上限</label>
                 <input x-model="idn.maxMemoryChars" type="number" min="256" max="24000" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="留空默认 6000">
+                <label class="mt-2 flex items-center gap-1.5 text-xs text-zinc-400"><input type="checkbox" x-model="idn.judgeWithMainModel" class="h-4 w-4 accent-[#f4a07c]"><span>用聊天主模型审自己的记忆候选</span></label>
+                <p class="mt-1 text-[11px] leading-5 text-zinc-500">关掉省主模型额度:下面填了审核模型就用它,没填交给环境设置里的代审模型。</p>
+                <label class="mt-2 block text-xs text-zinc-400">审自己记忆用的模型</label>
+                <input x-model="idn.judgeModel" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="留空用它最近聊天的主模型,如 anthropic/claude-opus-5">
+                <p class="mt-1 text-[11px] leading-5 text-zinc-500">主模型太贵或太慢时填一个 author/model,走 chat。聊天原文保留期内没聊过又没填时,交给环境设置里的代审模型。</p>
               </details>
             </div>
           </template>
@@ -1061,8 +1154,19 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
                   <legend class="px-1 text-xs text-zinc-500" x-text="g.group"></legend>
                   <template x-for="item in g.items" :key="item.name">
                     <div class="mt-2">
-                      <label class="block text-xs text-zinc-400" x-text="item.label"></label>
-                      <input x-model="item.value" :placeholder="item.deployed || '未设置,用代码默认值'" :title="item.name" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral">
+                      <template x-if="item.kind === 'switch'">
+                        <div class="flex items-center justify-between gap-3">
+                          <span class="text-xs text-zinc-400" x-text="item.label"></span>
+                          <button type="button" role="switch" :aria-checked="settingOn(item) ? 'true' : 'false'" :aria-label="item.label" :title="item.name" @click="toggleSetting(item)" class="switch" :class="settingOn(item) ? 'is-on' : ''"><span></span></button>
+                        </div>
+                      </template>
+                      <template x-if="item.kind !== 'switch'">
+                        <div>
+                          <label class="block text-xs text-zinc-400" x-text="item.label"></label>
+                          <input x-model="item.value" :placeholder="item.deployed || '未设置,用代码默认值'" :title="item.name" class="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral">
+                        </div>
+                      </template>
+                      <p x-show="item.hint" class="mt-1 text-[11px] leading-5 text-zinc-500" x-text="item.hint || ''"></p>
                     </div>
                   </template>
                 </fieldset>
@@ -1079,6 +1183,54 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
         </article>
       </section>
     </main>
+  </div>
+
+  <!-- 查看谁的记忆：平时收成侧栏 / 顶栏里的一行，点开才是完整面板，不再占着每一页的顶上。 -->
+  <div x-show="spaceOpen" x-transition.opacity.duration.150ms @keydown.escape.window="spaceOpen = false" class="fixed inset-0 z-50">
+    <div class="absolute inset-0 bg-[#0a0a0b]/70" @click="spaceOpen = false"></div>
+    <section role="dialog" aria-modal="true" aria-label="选择助手的记忆" class="absolute inset-x-0 bottom-0 max-h-[85dvh] overflow-y-auto rounded-t-2xl border border-zinc-800 bg-zinc-900/95 p-4 pb-[max(16px,env(safe-area-inset-bottom))] shadow-sm md:bottom-auto md:top-16 md:mx-auto md:w-[34rem] md:rounded-2xl md:pb-4">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 class="text-sm font-semibold text-zinc-100">查看谁的记忆</h2>
+        <button type="button" @click="spaceOpen = false" class="tap grid place-items-center rounded-2xl text-zinc-400 transition duration-150 ease-in-out hover:text-zinc-100" aria-label="关闭">
+          <i data-lucide="x" class="h-4 w-4"></i>
+        </button>
+      </div>
+        <div class="grid gap-3">
+          <label class="text-xs text-zinc-400">助手
+            <select x-model="selectedIdentity" @change="selectIdentity($event.target.value)" class="mt-2 h-11 w-full rounded-xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm text-zinc-100">
+              <option value="">自选空间（高级）</option>
+              <template x-for="idn in memoryIdentities" :key="idn.slug"><option :value="idn.slug" x-text="idn.slug"></option></template>
+            </select>
+          </label>
+          <label class="text-xs text-zinc-400" x-show="selectedIdentity">空间
+            <select x-model="namespace" @change="switchSpace($event.target.value)" class="mt-2 h-11 w-full rounded-xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm text-zinc-100">
+              <template x-for="space in identitySpaces()" :key="space.name"><option :value="space.name" x-text="space.label"></option></template>
+            </select>
+          </label>
+        </div>
+        <p class="mt-2 text-xs leading-6 text-zinc-400" x-text="spaceDescription()"></p>
+        <p class="text-xs leading-6 text-zinc-500">这里切换查看的记忆；客户端使用哪位助手由接入地址和钥匙决定。</p>
+        <div x-show="selectedIdentity" class="mt-3 rounded-xl border border-zinc-800 bg-[#0a0a0b] p-3">
+          <p class="text-xs text-zinc-400">说话人名字</p>
+          <p class="mt-1 text-[11px] leading-5 text-zinc-500">Dream、日记、周月卷、审核写记忆时只用这两个名字，不许写用户/助手。</p>
+          <div class="mt-2 grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+            <label class="text-xs text-zinc-400">用户叫什么
+              <input x-model="speakerUserName" class="mt-1 h-11 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="如 小南">
+            </label>
+            <label class="text-xs text-zinc-400">助手叫什么
+              <input x-model="speakerAssistantName" class="mt-1 h-11 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none focus:border-coral" placeholder="如 小北；留空用路径名">
+            </label>
+            <button type="button" @click="saveSpeakers()" :disabled="speakerBusy" class="tap h-11 rounded-2xl bg-coral px-4 text-sm font-semibold text-zinc-950 transition duration-150 ease-in-out active:bg-coral/80 disabled:opacity-60">保存名字</button>
+          </div>
+        </div>
+        <p x-show="identityLoadError" x-text="identityLoadError" class="mt-2 text-xs text-coral"></p>
+        <details class="mt-2" :open="!selectedIdentity">
+          <summary class="cursor-pointer text-xs text-zinc-500">高级：手动指定空间</summary>
+          <label class="mt-2 block text-xs text-zinc-400">空间名
+            <input :value="namespace" @change="selectCustomSpace($event.target.value)" class="mt-2 h-11 w-full rounded-xl border border-zinc-800 bg-[#0a0a0b] px-3 text-sm text-zinc-100" placeholder="default">
+          </label>
+        </details>
+    </section>
   </div>
 
   <nav class="z-40 shrink-0 border-t border-zinc-800 bg-[#0a0a0b]/95 px-2 pb-[max(10px,env(safe-area-inset-bottom))] pt-2 backdrop-blur md:hidden">
@@ -1128,6 +1280,18 @@ function memoryAdmin() {
     gwGroups: [],
     gwSecrets: [],
     gwBusy: false,
+    recallHistory: [],
+    recallHistoryLoading: false,
+    recallHistoryError: '',
+    recallHistoryRevision: 0,
+    memoryIdentities: [],
+    selectedIdentity: localStorage.getItem('aelios.admin.identity') || '',
+    identityPreferenceReady: localStorage.getItem('aelios.admin.identity') !== null,
+    identityLoadError: '',
+    speakerUserName: '',
+    speakerAssistantName: '',
+    speakerBusy: false,
+    spaceRevision: 0,
     page: 'today',
     moreView: 'runtime',
     workerUrl: localStorage.getItem('aelios.admin.workerUrl') || location.origin,
@@ -1140,6 +1304,9 @@ function memoryAdmin() {
 
     todayMessages: [],
     candidates: [],
+    judgeDecisions: [],
+    spaceOpen: false,
+    autoReview: null,
     memories: [],
     precious: [],
     glossary: [],
@@ -1176,10 +1343,141 @@ function memoryAdmin() {
     runtimeStatusLoading: false,
     runtimeStatusError: '',
 
-    init() {
+    async init() {
       this.applyTheme();
       this.icons();
-      this.reloadAll();
+      await this.loadMemoryIdentities();
+      await this.reloadAll();
+    },
+    currentIdentity() {
+      return this.memoryIdentities.find(idn => idn.slug === this.selectedIdentity);
+    },
+    settingOn(item) {
+      const raw = String(item.value || item.deployed || '').trim().toLowerCase();
+      return raw === 'on' || raw === 'true' || raw === '1';
+    },
+    // 开存 on；关时留空回落部署值，部署值本身是开的才写 off 压住它。保存仍走下面的「保存」。
+    toggleSetting(item) {
+      if (this.settingOn(item)) {
+        const deployed = String(item.deployed || '').trim().toLowerCase();
+        item.value = (deployed === 'on' || deployed === 'true' || deployed === '1') ? 'off' : '';
+      } else {
+        item.value = 'on';
+      }
+    },
+    viewingLabel() {
+      const idn = this.currentIdentity();
+      const name = idn ? ((idn.assistantName || '').trim() || idn.slug) : '自选空间';
+      return name + ' · ' + (this.namespace || 'default');
+    },
+    identitySpaces() {
+      const idn = this.currentIdentity();
+      if (!idn) return [];
+      const write = idn.namespace || idn.slug;
+      const reads = idn.readNamespaces === undefined ? [write] : idn.readNamespaces;
+      return [...new Set([write, ...reads])].map(name => ({ name: name,
+        label: name + (name === write ? ' · 写入空间' : ' · 召回空间') }));
+    },
+    spaceDescription() {
+      const idn = this.currentIdentity();
+      if (!idn) return '当前查看：' + this.namespace;
+      const write = idn.namespace || idn.slug;
+      const reads = idn.readNamespaces === undefined ? [write] : idn.readNamespaces;
+      const owners = this.memoryIdentities.filter(other =>
+        (other.namespace || other.slug) === this.namespace ||
+        (other.readNamespaces || []).includes(this.namespace)).map(other => other.slug);
+      return '写入：' + write + '；召回：' + (reads.length ? reads.join('、') : '已关闭') +
+        (owners.length > 1 ? '。当前空间也被这些助手使用：' + owners.filter(name => name !== idn.slug).join('、') : '');
+    },
+    async loadMemoryIdentities() {
+      if (!this.apiKey.trim()) return;
+      const revision = this.spaceRevision;
+      try {
+        const config = await this.request('/api/gateway/config');
+        if (revision !== this.spaceRevision) return;
+        this.memoryIdentities = config.identities || [];
+        this.identityLoadError = '';
+        const saved = localStorage.getItem('aelios.admin.identity');
+        let idn = this.currentIdentity();
+        // Keep an explicitly chosen custom space, including an old unconfigured library.
+        if (!idn && saved === null) {
+          idn = this.memoryIdentities.find(item => (item.namespace || item.slug) === this.namespace);
+          if (!idn && (this.namespace === 'default' || !this.namespace)) idn = this.memoryIdentities[0];
+        }
+        this.selectedIdentity = idn ? idn.slug : '';
+        this.identityPreferenceReady = true;
+        if (idn && !this.identitySpaces().some(space => space.name === this.namespace)) {
+          this.namespace = idn.namespace || idn.slug;
+          this.spaceRevision += 1;
+          this.clearSpaceData();
+        }
+        this.savePrefs();
+        this.syncSpeakerDraft();
+      } catch (error) {
+        if (revision !== this.spaceRevision) return;
+        this.identityLoadError = '助手列表读取失败，可在高级选项中填写空间名：' + error.message;
+      }
+    },
+    selectIdentity(slug) {
+      this.identityPreferenceReady = true;
+      this.selectedIdentity = slug;
+      this.syncSpeakerDraft();
+      const idn = this.currentIdentity();
+      return this.switchSpace(idn ? (idn.namespace || idn.slug) : this.namespace);
+    },
+    syncSpeakerDraft() {
+      const idn = this.currentIdentity();
+      this.speakerUserName = idn && idn.userName || '';
+      this.speakerAssistantName = idn && idn.assistantName || '';
+    },
+    async saveSpeakers() {
+      const slug = this.selectedIdentity;
+      if (!slug || this.speakerBusy) return;
+      this.speakerBusy = true;
+      try {
+        const config = await this.request('/api/gateway/config');
+        const identities = config.identities || [];
+        const idn = identities.find(item => item.slug === slug);
+        if (!idn) throw new Error('找不到这位助手');
+        const userName = (this.speakerUserName || '').trim();
+        const assistantName = (this.speakerAssistantName || '').trim();
+        if (userName) idn.userName = userName; else delete idn.userName;
+        if (assistantName) idn.assistantName = assistantName; else delete idn.assistantName;
+        await this.request('/api/gateway/config', { method: 'PUT', body: JSON.stringify(config) });
+        const card = this.gwIdentities.find(item => item.slug === slug);
+        if (card) { card.userName = userName; card.assistantName = assistantName; }
+        await this.loadMemoryIdentities();
+        this.notify('说话人名字保存好了');
+      } catch (error) { this.notify('说话人名字保存失败:' + error.message); }
+      this.speakerBusy = false;
+    },
+    selectCustomSpace(name) {
+      this.identityPreferenceReady = true;
+      this.selectedIdentity = '';
+      return this.switchSpace(name);
+    },
+    async switchSpace(name) {
+      this.namespace = name.trim() || 'default';
+      this.spaceRevision += 1;
+      this.clearSpaceData();
+      await this.reloadAll();
+    },
+    clearSpaceData() {
+      this.recallHistoryRevision += 1;
+      this.recallHistory = []; this.recallHistoryError = ''; this.recallHistoryLoading = false;
+      this.boot = {}; this.stats = {};
+      this.todayMessages = []; this.candidates = []; this.judgeDecisions = []; this.memories = [];
+      this.precious = []; this.glossary = [];
+      this.diaryDailies = []; this.diaryWeeklies = []; this.diaryExpanded = {};
+      this.worldItems = []; this.worldSelection = {}; this.worldQuery = '';
+      this.memoryCreateOpen = false;
+      this.memoryDraft = { type: 'fact', content: '', fact_key: '', importance: 0.7, confidence: 0.85 };
+      this.glossaryDraft = { term: '', definition: '', aliasesText: '' };
+      this.dreamStatus = null; this.dreamRuns = []; this.dreamHarvest = null;
+      this.dreamExpanded = {}; this.dreamRunResult = null;
+      this.dreamDate = ''; this.dreamHarvestDate = '';
+      this.dreamLoading = false; this.dreamHarvestLoading = false;
+      this.debugOutput = '尚未运行维护操作';
     },
     icons() {
       this.$nextTick(function() {
@@ -1193,16 +1491,22 @@ function memoryAdmin() {
     savePrefs() {
       localStorage.setItem('aelios.admin.workerUrl', this.workerUrl || location.origin);
       localStorage.setItem('aelios.admin.namespace', this.namespace || 'default');
+      if (this.identityPreferenceReady) localStorage.setItem('aelios.admin.identity', this.selectedIdentity || '');
       localStorage.setItem('aelios.admin.colorMode', this.theme || 'light');
     },
     tokenSaved() {
       return (this.apiKey || '') === (this.savedApiKey || '');
     },
-    saveToken() {
+    async saveToken() {
+      this.spaceRevision += 1;
+      this.clearSpaceData();
+      this.memoryIdentities = [];
       this.savePrefs();
       localStorage.setItem('aelios.admin.apiKey', this.apiKey || '');
       this.savedApiKey = this.apiKey || '';
       this.notify(this.apiKey && this.apiKey.trim() ? 'Token 已保存' : 'Token 已清空');
+      await this.loadMemoryIdentities();
+      await this.switchSpace(this.namespace);
     },
     clearToken() {
       this.apiKey = '';
@@ -1247,22 +1551,53 @@ function memoryAdmin() {
         if (self.toast === message) self.toast = '';
       }, 2400);
     },
+    recallStatusLabel(status) {
+      return { reranked: '原文重排＋规则', lexical: '词面兜底', empty: '没有候选', error: '本轮未注入' }[status] || '旧版召回';
+    },
+    recallReasonLabel(reason) {
+      const labels = { no_safe_window: '没有能完整保留局部上下文的短片段', rerank_selected: '原文片段相关，已通过规则筛选', lexical_fallback_selected: '重排不可用，改用词面命中', below_rerank_threshold: '相关分数不足，不凑数', duplicate_source: '同一来源本次只占一个位置', duplicate_fact: '同一事实已选更高分版本', impression_not_evidence: '日记印象不当作事实证据', latest_requires_evidence: '要排最近一次，相关分做不到，本轮不注入', reranker_timeout: '原文重排超时，已回落词面', reranker_missing_binding: '缺少 Worker AI 绑定，已回落词面', reranker_disabled: '重排已关闭，已回落词面', reranker_unsupported_model: '请配置 Workers AI 重排模型', reranker_invalid_response: '重排分数无效，已回落词面', reranker_failed: '原文重排失败，已回落词面', duplicate_content: '同一内容只保留一份', already_visible: '聊天历史里已经有了', item_budget: '已选出更合适的记忆', candidate_budget: '超过本次候选数量', empty_content: '没有可用正文' };
+      if (labels[reason]) return labels[reason];
+      return reason || '';
+    },
+    async loadRecallHistory() {
+      const revision = ++this.recallHistoryRevision;
+      const spaceRevision = this.spaceRevision;
+      const identity = this.selectedIdentity;
+      const base = this.base(), key = this.apiKey;
+      this.recallHistory = []; this.recallHistoryError = ''; this.recallHistoryLoading = false;
+      if (!identity || !this.apiKey.trim()) return;
+      this.recallHistoryLoading = true;
+      const current = () => revision === this.recallHistoryRevision && spaceRevision === this.spaceRevision &&
+        identity === this.selectedIdentity && base === this.base() && key === this.apiKey;
+      try {
+        const data = await this.request('/api/gateway/recalls?identity=' + encodeURIComponent(identity));
+        if (current()) this.recallHistory = data.items || [];
+      } catch (error) {
+        if (current()) this.recallHistoryError = '召回记录读取失败：' + error.message;
+      } finally {
+        if (current()) this.recallHistoryLoading = false;
+      }
+    },
     async gwLoad() {
       if (this.gwBusy) return;
       this.gwBusy = true;
       try {
         const config = await this.request('/api/gateway/config');
         this.gwAddress = config.upstream && config.upstream.address || '';
+        await this.loadMemoryIdentities();
         this.gwIdentities = (config.identities || []).map(function(idn) {
           return {
             slug: idn.slug || '',
+            userName: idn.userName || '',
+            assistantName: idn.assistantName || '',
             modelsText: (idn.models || []).join(', '),
             namespace: idn.namespace || '',
             readNamespacesText: idn.readNamespaces ? (idn.readNamespaces.length ? idn.readNamespaces.join(', ') : '[]') : '',
             keys: idn.keys && idn.keys.length ? idn.keys.slice() : ['CHATBOX_API_KEY'],
             anthropicThinking: idn.anthropicThinking || 'passthrough',
             maxMemoryChars: idn.maxMemoryChars || '',
-            autoCache: idn.autoCache === true
+            judgeModel: idn.judgeModel || '',
+            judgeWithMainModel: idn.judgeWithMainModel !== false
           };
         });
         const envData = await this.request('/api/gateway/env');
@@ -1273,7 +1608,7 @@ function memoryAdmin() {
       this.gwBusy = false;
     },
     gwAdd() {
-      this.gwIdentities.push({ slug: '', modelsText: '', namespace: '', readNamespacesText: '', keys: ['CHATBOX_API_KEY'], anthropicThinking: 'passthrough', maxMemoryChars: '', autoCache: false });
+      this.gwIdentities.push({ slug: '', userName: '', assistantName: '', modelsText: '', namespace: '', readNamespacesText: '', keys: ['CHATBOX_API_KEY'], anthropicThinking: 'passthrough', maxMemoryChars: '', judgeModel: '', judgeWithMainModel: true });
     },
     async gwSave() {
       if (this.gwBusy) return;
@@ -1285,13 +1620,16 @@ function memoryAdmin() {
             keys: idn.keys,
             models: (idn.modelsText || '').split(/[,，\n]/).map(function(s) { return s.trim(); }).filter(Boolean)
           };
+          if ((idn.userName || '').trim()) out.userName = idn.userName.trim();
+          if ((idn.assistantName || '').trim()) out.assistantName = idn.assistantName.trim();
           if ((idn.namespace || '').trim()) out.namespace = idn.namespace.trim();
           const reads = (idn.readNamespacesText || '').trim();
           if (reads) out.readNamespaces = reads === '[]' ? [] : reads.split(/[,，\n]/).map(function(s) { return s.trim(); }).filter(Boolean);
           if (idn.anthropicThinking && idn.anthropicThinking !== 'passthrough') out.anthropicThinking = idn.anthropicThinking;
-          if (idn.autoCache) out.autoCache = true;
           const budget = parseInt(idn.maxMemoryChars, 10);
           if (budget) out.maxMemoryChars = budget;
+          if ((idn.judgeModel || '').trim()) out.judgeModel = idn.judgeModel.trim();
+          if (idn.judgeWithMainModel === false) out.judgeWithMainModel = false;
           return out;
         });
         const config = { version: 3, identities: identities };
@@ -1304,6 +1642,8 @@ function memoryAdmin() {
           config.settings = settings;
         }
         const result = await this.request('/api/gateway/config', { method: 'PUT', body: JSON.stringify(config) });
+        await this.loadMemoryIdentities();
+        await this.switchSpace(this.namespace);
         this.notify('保存好了,' + (result.identities || 0) + ' 个助手,环境设置最长 10 秒全网生效');
       } catch (error) { this.notify('网关保存失败:' + error.message); }
       this.gwBusy = false;
@@ -1311,6 +1651,10 @@ function memoryAdmin() {
     async reloadAll() {
       this.savePrefs();
       var tasks = [this.loadBoot(), this.loadCandidates(), this.loadMemories()];
+      if (this.page === 'review') tasks.push(this.loadJudgeDecisions());
+      if (this.page === 'settings') tasks.push(this.loadRecallHistory());
+      if (this.page === 'diary') tasks.push(this.loadDiary());
+      if (this.page === 'more' && this.moreView === 'world') tasks.push(this.loadWorldFacts());
       if (this.page === 'dream') {
         tasks.push(this.loadDreamStatus());
         tasks.push(this.loadDreamHarvest());
@@ -1325,26 +1669,27 @@ function memoryAdmin() {
       return { start: start.toISOString(), end: end.toISOString() };
     },
     async loadBoot() {
+      const revision = this.spaceRevision;
       try {
         const range = this.todayRange();
         const data = await this.request(this.withNamespace('/v1/memory_boot?start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end)));
+        if (revision !== this.spaceRevision) return;
         this.boot = data.data || {};
         this.stats = this.boot.stats || {};
 
         this.todayMessages = this.boot.today_messages || [];
         this.precious = this.boot.precious || [];
         this.glossary = this.boot.glossary || [];
-        if (this.moreView === 'world') {
-          this.worldItems = [];
-          this.pruneWorldSelection();
-        }
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
         this.notify(error.message);
       }
     },
     async loadCandidates() {
+      const revision = this.spaceRevision;
       try {
         const data = await this.request(this.withNamespace('/v1/candidates?status=pending&limit=100'));
+        if (revision !== this.spaceRevision) return;
         this.candidates = (data.data || []).map(function(item) {
           item.editing = false;
           item.mergeOpen = false;
@@ -1353,14 +1698,57 @@ function memoryAdmin() {
           return item;
         });
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
+        this.notify(error.message);
+      }
+    },
+    async loadJudgeDecisions() {
+      const revision = this.spaceRevision;
+      try {
+        const data = await this.request(this.withNamespace('/v1/candidates/decisions?days=7'));
+        if (revision !== this.spaceRevision) return;
+        this.judgeDecisions = data.data || [];
+        this.autoReview = data.auto_review || null;
+        this.icons();
+      } catch (error) {
+        if (revision !== this.spaceRevision) return;
+        this.notify(error.message);
+      }
+    },
+    judgeDecisionLabel(item) {
+      const archive = item.source === 'dream_delete';
+      if (item.undone) {
+        if (archive) return item.status === 'approved' ? '撤回后归档' : '撤回后放回';
+        return item.status === 'approved' ? '撤回后补记' : '撤回后收回';
+      }
+      const verdict = archive
+        ? (item.status === 'approved' ? '归档了' : '留着')
+        : (item.status === 'approved' ? '记住了' : '放下了');
+      return (item.judged_by || '代审') + ' · ' + verdict;
+    },
+    judgeUndoLabel(item) {
+      if (item.source === 'dream_delete') return item.status === 'approved' ? '撤回，放回来' : '撤回，归档它';
+      return item.status === 'approved' ? '撤回，不记了' : '撤回，记下来';
+    },
+    async undoJudgeDecision(item) {
+      try {
+        await this.request(this.withNamespace('/v1/candidates/' + encodeURIComponent(item.id) + '/undo'), {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+        await Promise.all([this.loadJudgeDecisions(), this.loadMemories(), this.loadBoot()]);
+        this.notify('已撤回');
+      } catch (error) {
         this.notify(error.message);
       }
     },
     async loadMemories() {
+      const revision = this.spaceRevision;
       try {
         const typeParam = this.memoryType && this.memoryType !== 'all' ? '&type=' + encodeURIComponent(this.memoryType) : '';
         const path = '/v1/memory?status=active&limit=100' + typeParam;
         const data = await this.request(this.withNamespace(path));
+        if (revision !== this.spaceRevision) return;
         this.memories = (data.data || []).map(function(item) {
           item.editing = false;
           item.mergeOpen = false;
@@ -1369,6 +1757,7 @@ function memoryAdmin() {
           return item;
         });
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
         this.notify(error.message);
       }
     },
@@ -1446,11 +1835,14 @@ function memoryAdmin() {
       return Number.isFinite(collected.getTime()) ? '采集于 ' + collected.toLocaleString('zh-CN', { hour12: false }) : '采集时间未知';
     },
     async loadWorldFacts() {
+      const revision = this.spaceRevision;
       try {
         const data = await this.request(this.withNamespace('/v1/memory?status=active&limit=80&type=world_fact'));
+        if (revision !== this.spaceRevision) return;
         this.worldItems = data.data || [];
         this.pruneWorldSelection();
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
         this.worldItems = [];
         this.pruneWorldSelection();
         this.notify(error.message);
@@ -1749,6 +2141,7 @@ function memoryAdmin() {
       }
     },
     async searchWorld() {
+      const revision = this.spaceRevision;
       if (!this.worldQuery.trim()) {
         await this.loadWorldFacts();
         return;
@@ -1758,9 +2151,11 @@ function memoryAdmin() {
           method: 'POST',
           body: JSON.stringify({ namespace: this.namespace, query: this.worldQuery, top_k: 30, filter: false })
         });
+        if (revision !== this.spaceRevision) return;
         this.worldItems = data.data || [];
         this.pruneWorldSelection();
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
         this.notify(error.message);
       }
       this.icons();
@@ -1776,6 +2171,17 @@ function memoryAdmin() {
     async runReindex(dryRun) {
       try {
         const data = await this.request('/v1/debug/vector_reindex', {
+          method: 'POST',
+          body: JSON.stringify({ namespace: this.namespace, limit: 50, dry_run: dryRun })
+        });
+        this.debugOutput = JSON.stringify(data, null, 2);
+      } catch (error) {
+        this.debugOutput = error.message;
+      }
+    },
+    async runBackfill(dryRun) {
+      try {
+        const data = await this.request('/v1/vector-backfill', {
           method: 'POST',
           body: JSON.stringify({ namespace: this.namespace, limit: 50, dry_run: dryRun })
         });
@@ -1803,7 +2209,8 @@ function memoryAdmin() {
         return;
       }
       this.page = id;
-      if (id === 'review') this.loadCandidates();
+      if (id === 'settings') { this.loadRecallHistory(); if (!this.gwGroups.length) this.gwLoad(); }
+      if (id === 'review') { this.loadCandidates(); this.loadJudgeDecisions(); }
       if (id === 'memory') this.loadMemories();
       if (id === 'diary') this.loadDiary();
       if (id === 'more') this.loadMoreView();
@@ -1814,12 +2221,15 @@ function memoryAdmin() {
       this.icons();
     },
     async loadDiary() {
+      const revision = this.spaceRevision;
       try {
         const data = await this.request(this.withNamespace('/admin/diary?limit=30'));
+        if (revision !== this.spaceRevision) return;
         const payload = data.data || {};
         this.diaryDailies = payload.dailies || [];
         this.diaryWeeklies = payload.weeklies || [];
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
         this.notify(error.message);
       }
       this.icons();
@@ -1842,27 +2252,33 @@ function memoryAdmin() {
       return (this.dreamStatus && this.dreamStatus.anchor_date_label) || this.yesterdayLabel();
     },
     async loadDreamStatus() {
+      const revision = this.spaceRevision;
       this.dreamLoading = true;
       try {
         const data = await this.request(this.withNamespace('/v1/dream/status'));
+        if (revision !== this.spaceRevision) return;
         const payload = data.data || {};
         this.dreamStatus = payload;
         this.dreamRuns = payload.dream_runs || [];
         if (!this.dreamDate) this.dreamDate = this.dreamAnchorDate();
         if (!this.dreamHarvestDate) this.dreamHarvestDate = this.dreamAnchorDate();
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
         this.notify(error.message);
       }
       this.dreamLoading = false;
       this.icons();
     },
     async loadDreamHarvest() {
+      const revision = this.spaceRevision;
       if (!this.dreamHarvestDate) this.dreamHarvestDate = this.dreamAnchorDate();
       this.dreamHarvestLoading = true;
       try {
         const data = await this.request(this.withNamespace('/admin/dream/harvest?date=' + encodeURIComponent(this.dreamHarvestDate)));
+        if (revision !== this.spaceRevision) return;
         this.dreamHarvest = data.data || null;
       } catch (error) {
+        if (revision !== this.spaceRevision) return;
         this.dreamHarvest = null;
         this.notify(error.message);
       }

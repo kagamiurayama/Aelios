@@ -3,6 +3,7 @@ import type { DreamRunTrigger } from "../../db/dreamRuns";
 import { listMemoriesPage } from "../../db/memories";
 import { readCursor } from "../../db/retention";
 import { archiveMemory, fetchMemoryLifecycleRows } from "../../db/v2";
+import type { DreamSpeakers } from "../../gateway/config";
 import type { Env, MemoryApiRecord, MessageRecord } from "../../types";
 import { getDateRangeForLabel } from "../dreamDates";
 import { DEFAULT_EMPTY_MEMORY_MIN_CHARS } from "../dreamEnv";
@@ -23,6 +24,7 @@ import {
   listVectorMemories
 } from "../vectorStore";
 import { isV2Enabled } from "../v2/recall";
+import { cleanMessageText } from "../../utils/sanitize";
 
 export interface DigestMemoryUpdate {
   target_id: string;
@@ -209,11 +211,13 @@ export function normalizeDigestResult(value: unknown): DailyDigestResult {
   };
 }
 
-export function formatTranscript(messages: MessageRecord[]): string {
+export function formatTranscript(messages: MessageRecord[], speakers: DreamSpeakers | null = null): string {
   return messages
     .map((message) => {
-      const role = message.role === "assistant" ? "我(助手)" : "用户";
-      return `[${message.id}][${message.created_at}][${role}] ${truncate(message.content.trim(), 700)}`;
+      const role = message.role === "assistant"
+        ? (speakers?.assistantName ?? "我(助手)")
+        : (speakers?.userName ?? "用户");
+      return `[${message.id}][${message.created_at}][${role}] ${truncate(cleanMessageText(message.content), 700)}`;
     })
     .join("\n\n");
 }
@@ -292,7 +296,7 @@ const DREAM_CONTEXT_QUERY_MAX_CHARS = 4000;
 export function buildDreamContextQuery(messages: MessageRecord[]): string {
   const recent = messages.slice(-DREAM_CONTEXT_QUERY_MAX_MESSAGES);
   const text = recent
-    .map((message) => message.content.trim())
+    .map((message) => cleanMessageText(message.content))
     .filter(Boolean)
     .join("\n");
   return truncate(text, DREAM_CONTEXT_QUERY_MAX_CHARS);

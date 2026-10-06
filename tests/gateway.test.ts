@@ -4,16 +4,22 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import worker from "../src/index";
-import { identityNamespace, identityReadNamespaces, invalidateSettingsCache, validateConfig } from "../src/gateway/config";
+import { identityNamespace, identityReadNamespaces, invalidateSettingsCache, speakersForNamespace, validateConfig } from "../src/gateway/config";
 import { appendMemory, classifyTurn, canonical } from "../src/gateway/protocol";
-import { catalogUrl, resolveUpstream, routeFor } from "../src/gateway/upstream";
+import { catalogUrl, resolveUpstream, routeFor, rejectedToolFields } from "../src/gateway/upstream";
 import { OutputCollector, observeResponse, persistExchange, prepareExchange, dispatchExchange } from "../src/gateway/record";
 
-// Test actual production modules and SQL, replacing only the external HTTP call.
+import { lexicalOverlapScore, shapeRecallQuery } from "../src/memory/queryShape";
+
+// Test production modules and SQL with deterministic HTTP and Workers AI doubles.
 (crypto.subtle as any).timingSafeEqual = (a: Uint8Array, b: Uint8Array) => timingSafeEqual(a, b);
 let sqlite: DatabaseSync;
-let db: any, env: any, ctx: any;
-let pending: Promise<unknown>[], calls: any[], queue: any[];
+let db: any;
+let env: any;
+let ctx: any;
+let pending: Promise<unknown>[];
+let calls: any[];
+let queue: any[];
 const identity = () => ({ slug: "partner", namespace: "partner-a", keys: ["CHATBOX_API_KEY"],
   anthropicThinking: "drop_block", models: ["partner", "listed-model", "*opus*"] });
 function config(identities = [identity()]) {
@@ -22,8 +28,8 @@ function config(identities = [identity()]) {
 function setConfig(c: any) { env.GATEWAY_CONFIG = JSON.stringify(c); }
 beforeEach(() => {
   sqlite?.close(); sqlite = new DatabaseSync(":memory:");
-  for (const file of readdirSync("migrations").filter(f => f.endsWith(".sql")).sort()) {
-    try { sqlite.exec(readFileSync("migrations/" + file, "utf8")); }
+  for (const file of readdirSync("migrations").filter((f: string) => f.endsWith(".sql")).sort()) {
+    try { sqlite.exec(readFileSync(`migrations/${file}`, "utf8")); }
     catch (error) {
       if (!String(error).includes("fts5")) throw error;
     }
@@ -45,6 +51,11 @@ beforeEach(() => {
   ctx = { waitUntil(p: Promise<unknown>) { pending.push(p); } };
   env = { DB: db, CHATBOX_API_KEY: "owner-key", IM_API_KEY: "im-key", MEMORY_MCP_API_KEY: "mcp-key",
     CLOUDFLARE_API_TOKEN: "cf-token",
+    AI: { async run(model: string, data: any) {
+      if (!model.includes("reranker")) throw new Error("embedding unavailable in test");
+      return { response: data.contexts.map((c: any, id: number) => ({ id,
+        score: lexicalOverlapScore(c.text, shapeRecallQuery({ query: data.query }).lexicalTokens) > 0 ? 0.9 : 0.01 })) };
+    } },
     MEMORY_QUEUE: { async send(e: any) { queue.push(e); } } };
   globalThis.fetch = async (url: any, init: any) => {
     if (String(url).endsWith("/models")) {
@@ -59,7 +70,7 @@ beforeEach(() => {
   setConfig(config());
 });
 function request(path: string, body?: any, headers: any = {}, method = body ? "POST" : "GET") {
-  return new Request("https://aelios.test" + path, { method,
+  return new Request(`https://aelios.test${path}`, { method,
     headers: { authorization: "Bearer owner-key", "content-type": "application/json", ...headers },
     ...(body ? { body: JSON.stringify(body) } : {}) });
 }
@@ -68,7 +79,7 @@ async function run(path: string, body?: any, headers?: any) {
   const text = await response.text(); await Promise.all(pending);
   return { response, text };
 }
-function count(table: string) { return sqlite.prepare(`SELECT count(*) AS n FROM ${table}`).get()!.n; }
+function count(table: string) { return (sqlite.prepare(`SELECT count(*) AS n FROM ${table}`).get() as any).n; }
 function precious(namespace: string, content: string) {
   const id = `${namespace}-${content.slice(0, 24)}`;
   sqlite.prepare("INSERT INTO precious (id, namespace, content, created_at) VALUES (?, ?, ?, ?)").run(id, namespace, content, "2026-09-06");
@@ -83,7 +94,7 @@ test("migrations, native chat recall, namespace isolation, original text and Que
   assert.equal(calls[0].url, "https://upstream.test/ai/v1/chat/completions");
   assert.equal(calls[0].headers.authorization, "Bearer cf-token");
   assert.match(calls[0].query.messages[0].content, /喜欢 Cloudflare/);
-  assert.match(calls[0].query.messages[0].content, /- \[precious\] 喜欢 Cloudflare/);
+  assert.match(calls[0].query.messages[0].content, /相关旧事.*喜欢 Cloudflare/);
   assert.doesNotMatch(calls[0].query.messages[0].content, /番茄炒蛋/);
   assert.doesNotMatch(calls[0].query.messages[0].content, /other identity/);
   assert.doesNotMatch(calls[0].query.messages[0].content, /\[\{"kind"/);
@@ -98,6 +109,79 @@ test("migrations, native chat recall, namespace isolation, original text and Que
   assert.deepEqual(calls[1].query.messages, continuation.messages);
   assert.equal(queue[1].kind, "tool"); assert.equal(queue[1].userText, "");
 });
+
+function seedQuote(namespace: string, id: string, role: "user" | "assistant", content: string) {
+  sqlite.prepare("INSERT OR IGNORE INTO conversations (id, namespace, created_at, updated_at) VALUES (?, ?, ?, ?)")
+    .run("c-quote", namespace, "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+  sqlite.prepare(`INSERT INTO messages
+    (id, conversation_id, namespace, role, content, source, client_message_hash, stream, created_at, seq)
+    VALUES (?, ?, ?, ?, ?, 'test', ?, 0, ?, 0)`).run(
+    id, "c-quote", namespace, role, content, id, "2026-09-01T00:00:00.000Z"
+  );
+}
+
+test("ordinary chat does not inject raw message quotes", async () => {
+  precious("partner-a", "喜欢 Cloudflare");
+  seedQuote("partner-a", "msg-noise", "assistant", "我喜欢吃番茄炒蛋，还喜欢深夜加糖的豆浆。");
+  const { response } = await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [{ role: "user", content: "我们喜欢什么？" }]
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-aelios-memory"), "injected");
+  const injected = JSON.stringify(calls[0].query.messages);
+  assert.match(injected, /喜欢 Cloudflare/);
+  assert.doesNotMatch(injected, /番茄炒蛋|豆浆/);
+});
+
+test("evidence questions may quote a message the memory store does not cover", async () => {
+  seedQuote("partner-a", "msg-pass", "user", "那天说的调试暗号是芝麻开门");
+  const { response } = await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [{ role: "user", content: "调试暗号是什么？" }]
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-aelios-memory"), "injected");
+  assert.match(JSON.stringify(calls[0].query.messages), /芝麻开门/);
+  assert.doesNotMatch(JSON.stringify(calls[0].query.messages), /msg-pass|c-quote/);
+});
+test("transport metadata stays on the wire but not in memory storage", async () => {
+  const envelope = '<message from="9fc3ec3b7f584cdfbfe84f72300e8f08" msg_id="7812076508172213971">迁企微、宁皎搬好了</message>';
+  await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: envelope }] });
+  assert.equal(calls[0].query.messages[0].content, envelope);
+  assert.equal(queue[0].userText, "迁企微、宁皎搬好了");
+  await persistExchange(env, queue[0]);
+  const stored = sqlite.prepare("SELECT content FROM messages WHERE role = 'user'").get() as { content: string };
+  assert.equal(stored.content, "迁企微、宁皎搬好了");
+});
+test("wecom envelopes recall on inner speech; recap turns skip recall and storage", async () => {
+  precious("partner-a", "喜欢 Cloudflare");
+  seedQuote("partner-a", "msg-noise", "assistant", "我喜欢吃番茄炒蛋，还喜欢深夜加糖的豆浆。");
+  const wecom = '<wecom-message from="086923c2648ccdfdb83072c64717dc35" msg_id="7812076508172213971">我们喜欢什么？</wecom-message>';
+  const wecomRes = await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: wecom }] });
+  assert.equal(wecomRes.response.status, 200);
+  assert.equal(wecomRes.response.headers.get("x-aelios-memory"), "injected");
+  assert.equal(calls[0].query.messages[0].content.split("\n\n")[0], wecom);
+  const wecomPatch = calls[0].query.messages[0].content.slice(wecom.length);
+  assert.match(wecomPatch, /喜欢 Cloudflare/);
+  assert.doesNotMatch(wecomPatch, /086923c2648ccdfdb83072c64717dc35|番茄炒蛋/);
+  assert.equal(queue[0].kind, "human");
+  assert.equal(queue[0].userText, "我们喜欢什么？");
+  const afterWecom = (sqlite.prepare("SELECT count(*) AS n FROM messages").get() as any).n as number;
+
+  const recap = "<recap>\nUser stepped away; returning. Recap: <40 words.";
+  const recapRes = await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: recap }] });
+  assert.equal(recapRes.response.status, 200);
+  assert.equal(recapRes.response.headers.get("x-aelios-memory"), "skipped");
+  assert.equal(calls[1].query.messages[0].content, recap);
+  assert.doesNotMatch(JSON.stringify(calls[1].query.messages), /喜欢 Cloudflare|番茄炒蛋/);
+  assert.equal(queue[1].kind, "auxiliary");
+  assert.equal(queue[1].userText, "");
+  await persistExchange(env, queue[1]);
+  assert.equal((sqlite.prepare("SELECT count(*) AS n FROM messages").get() as any).n, afterWecom);
+  const stored = sqlite.prepare("SELECT content FROM messages").all() as { content: string }[];
+  assert.ok(stored.every((row) => !/User stepped away|<recap>/i.test(row.content)));
+});
 test("Anthropic tool_result is not human; client beta, signatures, tools and cache survive", async () => {
   const body = { model: "partner", max_tokens: 1000, tools: [{ name: "t", input_schema: { type: "object" } }],
     messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "", signature: "opaque" }, { type: "tool_use", id: "t", name: "t", input: {} }] },
@@ -111,6 +195,47 @@ test("Anthropic tool_result is not human; client beta, signatures, tools and cac
   assert.equal(calls[0].headers.authorization, "Bearer cf-token");
   assert.equal(calls[0].headers["x-api-key"], undefined);
   assert.equal(queue[0].kind, "tool"); assert.equal(queue[0].assistantText, "Claude reply");
+});
+test("model tool calls are recorded; delivery receipts and tool results are not", async () => {
+  const mock = globalThis.fetch;
+  globalThis.fetch = async (url: any, init: any) => {
+    calls.push({ url: String(url), headers: Object.fromEntries(new Headers(init?.headers)), query: JSON.parse(init?.body as string) });
+    return Response.json({
+      model: "claude-test",
+      content: [
+        { type: "tool_use", id: "w", name: "weixin_send", input: { text: "今晚吃什么" } },
+        { type: "tool_use", id: "b", name: "bash", input: { command: "date" } },
+        { type: "text", text: "已回她。" }
+      ],
+      stop_reason: "tool_use"
+    });
+  };
+  try {
+    const { response } = await run("/v1/messages", {
+      model: "partner", max_tokens: 16, messages: [{ role: "user", content: "晚饭呢" }]
+    });
+    assert.equal(response.status, 200);
+    assert.match(queue[0].assistantText, /weixin_send/);
+    assert.match(queue[0].assistantText, /今晚吃什么/);
+    assert.match(queue[0].assistantText, /bash/);
+    assert.match(queue[0].assistantText, /date/);
+    assert.doesNotMatch(queue[0].assistantText, /已回她/);
+    await persistExchange(env, { ...queue[0], completion: "complete" });
+    const assistant = sqlite.prepare("SELECT content FROM messages WHERE role = 'assistant'").get() as { content: string };
+    assert.match(assistant.content, /今晚吃什么/);
+    assert.doesNotMatch(assistant.content, /已回她/);
+  } finally { globalThis.fetch = mock; }
+
+  const out = new OutputCollector("messages");
+  const event = (data: any) => out.chunk(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
+  event({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "t", name: "weixin_send", input: {} } });
+  event({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"text\":\"在的\"}" } });
+  event({ type: "content_block_stop", index: 0 });
+  event({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
+  event({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "已回她。" } });
+  event({ type: "message_stop" });
+  out.finish();
+  assert.equal(out.text, 'weixin_send {"text":"在的"}');
 });
 test("Responses string input, tool outputs and encrypted reasoning; hidden server history only rejected for main models", async () => {
   await run("/v1/responses", { model: "partner", input: "你好", store: true });
@@ -198,7 +323,7 @@ test("auxiliary and incomplete replies do not become Dream sources", async () =>
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Generate title" }] }, { "x-aelios-purpose": "auxiliary" });
   await persistExchange(env, queue[0]); assert.equal(count("messages"), 0);
   await persistExchange(env, { ...queue[0], id: "incomplete", kind: "human", userText: "real question", assistantText: "half reply", completion: "incomplete" });
-  assert.equal(count("messages"), 1); assert.equal(sqlite.prepare("SELECT role FROM messages").get()!.role, "user");
+  assert.equal(count("messages"), 1); assert.equal((sqlite.prepare("SELECT role FROM messages").get() as any).role, "user");
 });
 test("retry hashes ignore key order but distinguish later repeated words and sessions", async () => {
   const a = { model: "partner", messages: [{ role: "user", content: "Hi" }] };
@@ -211,11 +336,11 @@ test("retry hashes ignore key order but distinguish later repeated words and ses
 });
 test("main-model whitelist gates recall and recording; other models pass through untouched", async () => {
   precious("partner-a", "喜欢 Cloudflare");
-  const ask = (model: string, text = "Hi " + model + " 我们喜欢 Cloudflare 吗") =>
+  const ask = (model: string, text = `Hi ${model} 我们喜欢 Cloudflare 吗`) =>
     run("/v1/chat/completions", { model, messages: [{ role: "user", content: text }] });
   await ask("partner");
   assert.equal(calls[0].query.model, "partner");
-  assert.match(JSON.stringify(calls[0].query.messages), /\[precious\] 喜欢 Cloudflare/);
+  assert.match(JSON.stringify(calls[0].query.messages), /相关旧事.*喜欢 Cloudflare/);
   // Basename match: a glob pattern sees the model name with or without its author prefix.
   const opus = await ask("anthropic/claude-opus-4-6");
   assert.equal(opus.response.headers.get("x-aelios-memory"), "injected");
@@ -240,7 +365,7 @@ test("SSE byte-exact Unicode and CRLF boundaries; no thinking in observed text",
 });
 test("Responses terminal snapshot does not duplicate deltas; broken stream stays incomplete", () => {
   const out = new OutputCollector("responses");
-  const event = (data: any) => out.chunk(new TextEncoder().encode("data: " + JSON.stringify(data) + "\n\n"));
+  const event = (data: any) => out.chunk(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
   event({ type: "response.output_text.delta", delta: "Hello" });
   event({ type: "response.completed", response: { status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Hello" }] }] } });
   assert.equal(out.text, "Hello"); assert.equal(out.complete, true);
@@ -309,21 +434,171 @@ test("automatic caching lowers to the last cacheable block without rewriting sys
   await run("/v1/messages", noSystem);
   assert.deepEqual(calls[2].query.messages[0].content[0].cache_control, cc);
 });
-test("autoCache identity gets gateway-side ephemeral breakpoints; client markers win", async () => {
-  setConfig(config([{ ...identity(), autoCache: true }]));
-  const body = { model: "partner", max_tokens: 16, system: [{ type: "text", text: "persona" }],
-    messages: [{ role: "user", content: "Hi" }] };
-  const { response } = await run("/v1/messages", body);
-  assert.equal(response.status, 200);
-  assert.deepEqual(calls[0].query.system[0].cache_control, { type: "ephemeral" });
-  assert.deepEqual(calls[0].query.messages[0].content.at(-1).cache_control, { type: "ephemeral" });
-  const cc = { type: "ephemeral", ttl: "1h" };
-  await run("/v1/messages", { ...body, messages: [{ role: "user", content: [{ type: "text", text: "Hi", cache_control: cc }] }] });
-  assert.equal(calls[1].query.system[0].cache_control, undefined);
-  assert.deepEqual(calls[1].query.messages[0].content[0].cache_control, cc);
-  await run("/v1/messages", { ...body, model: "other" });
-  assert.equal(calls[2].query.system[0].cache_control, undefined);
-  assert.equal(calls[2].query.messages[0].content, "Hi");
+test("upstream rejecting tool cache_control is learned: retry once stripped, then pre-strip", async () => {
+  rejectedToolFields.clear();
+  const vertexError = JSON.stringify({ errorCode: "INVALID_ARGUMENT",
+    parameters: { unsafeParams: "{unrecognizedProperty=cache_control}" }, message: "Request contained an unrecognized field" });
+  const baseFetch = globalThis.fetch;
+  const seen: any[] = [];
+  let fail = true;
+  globalThis.fetch = async (url: any, init: any) => {
+    seen.push(JSON.parse(init?.body as string));
+    if (fail) { fail = false; return new Response(vertexError, { status: 400 }); }
+    return baseFetch(url, init);
+  };
+  try {
+    const body = { model: "partner", max_tokens: 16,
+      tools: [{ name: "t", input_schema: { type: "object" }, cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "Hi" }] };
+    const { response } = await run("/v1/messages", body);
+    assert.equal(response.status, 200);
+    assert.equal(seen.length, 2);
+    assert.deepEqual(seen[0].tools[0].cache_control, { type: "ephemeral" });
+    assert.equal(seen[1].tools[0].cache_control, undefined);
+    await run("/v1/messages", body);
+    assert.equal(seen.length, 3);
+    assert.equal(seen[2].tools[0].cache_control, undefined);
+  } finally {
+    globalThis.fetch = baseFetch;
+    rejectedToolFields.clear();
+  }
+});
+test("upstream rejecting eager_input_streaming is learned the same way", async () => {
+  rejectedToolFields.clear();
+  const relayError = JSON.stringify({ errorCode: "INVALID_ARGUMENT", errorName: "LanguageModelService:InvalidRequest",
+    parameters: { unsafeParams: "{unrecognizedProperty=eager_input_streaming}" },
+    message: "Request contained an unrecognized field" });
+  const baseFetch = globalThis.fetch;
+  const seen: any[] = [];
+  let fail = true;
+  globalThis.fetch = async (url: any, init: any) => {
+    seen.push(JSON.parse(init?.body as string));
+    if (fail) { fail = false; return new Response(relayError, { status: 400 }); }
+    return baseFetch(url, init);
+  };
+  try {
+    const body = { model: "partner", max_tokens: 16,
+      tools: [{ name: "t", input_schema: { type: "object" }, eager_input_streaming: true }],
+      messages: [{ role: "user", content: "Hi" }] };
+    const { response } = await run("/v1/messages", body);
+    assert.equal(response.status, 200);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0].tools[0].eager_input_streaming, true);
+    assert.equal(seen[1].tools[0].eager_input_streaming, undefined);
+    await run("/v1/messages", body);
+    assert.equal(seen.length, 3);
+    assert.equal(seen[2].tools[0].eager_input_streaming, undefined);
+  } finally {
+    globalThis.fetch = baseFetch;
+    rejectedToolFields.clear();
+  }
+});
+test("a relay refusing two tool fields learns both within one request", async () => {
+  rejectedToolFields.clear();
+  const baseFetch = globalThis.fetch;
+  const seen: any[] = [];
+  let round = 0;
+  globalThis.fetch = async (url: any, init: any) => {
+    const sent = JSON.parse(init?.body as string);
+    seen.push(sent);
+    round++;
+    // First pass rejects eager_input_streaming, second rejects cache_control, third succeeds.
+    if (round === 1) return new Response(JSON.stringify({ errorCode: "INVALID_ARGUMENT",
+      parameters: { unsafeParams: "{unrecognizedProperty=eager_input_streaming}" } }), { status: 400 });
+    if (round === 2) return new Response(JSON.stringify({ errorCode: "INVALID_ARGUMENT",
+      parameters: { unsafeParams: "{unrecognizedProperty=cache_control}" } }), { status: 400 });
+    return baseFetch(url, init);
+  };
+  try {
+    const body = { model: "partner", max_tokens: 16,
+      tools: [
+        { name: "a", input_schema: { type: "object" }, eager_input_streaming: true },
+        { name: "b", input_schema: { type: "object" }, eager_input_streaming: true,
+          cache_control: { type: "ephemeral" } }
+      ],
+      messages: [{ role: "user", content: "Hi" }] };
+    const { response } = await run("/v1/messages", body);
+    assert.equal(response.status, 200);
+    assert.equal(seen.length, 3);
+    assert.equal(seen[0].tools[0].eager_input_streaming, true);
+    assert.deepEqual(seen[1].tools[1].cache_control, { type: "ephemeral" });
+    assert.equal(seen[1].tools[0].eager_input_streaming, undefined);
+    assert.equal(seen[2].tools[0].eager_input_streaming, undefined);
+    assert.equal(seen[2].tools[1].cache_control, undefined);
+    // Both lessons stick for the next request.
+    await run("/v1/messages", body);
+    assert.equal(seen.length, 4);
+    assert.equal(seen[3].tools[0].eager_input_streaming, undefined);
+    assert.equal(seen[3].tools[1].cache_control, undefined);
+  } finally {
+    globalThis.fetch = baseFetch;
+    rejectedToolFields.clear();
+  }
+});
+test("an unrecognized field that is not strippable is returned, not retried", async () => {
+  rejectedToolFields.clear();
+  // `strict` is contract-legal and survives normalization, so it really is on the wire.
+  // It is deliberately absent from STRIPPABLE_TOOL_FIELDS: dropping the whitelist check
+  // would strip it and retry, turning this test red.
+  const junkError = JSON.stringify({ errorCode: "INVALID_ARGUMENT",
+    parameters: { unsafeParams: "{unrecognizedProperty=strict}" }, message: "Request contained an unrecognized field" });
+  const baseFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async () => { sends++; return new Response(junkError, { status: 400 }); };
+  try {
+    const { response } = await run("/v1/messages", { model: "partner", max_tokens: 16,
+      tools: [{ name: "t", input_schema: { type: "object" }, strict: true }],
+      messages: [{ role: "user", content: "Hi" }] });
+    assert.equal(response.status, 400);
+    assert.equal(sends, 1);
+    assert.equal(rejectedToolFields.size, 0);
+  } finally {
+    globalThis.fetch = baseFetch;
+    rejectedToolFields.clear();
+  }
+});
+test("UPSTREAM_STRIP_TOOL_FIELDS refuses to strip a tool's identity", async () => {
+  rejectedToolFields.clear();
+  // A typo here would otherwise ship a tool with no name or schema past validation.
+  env.UPSTREAM_STRIP_TOOL_FIELDS = "name, input_schema, eager_input_streaming";
+  const baseFetch = globalThis.fetch;
+  const seen: any[] = [];
+  globalThis.fetch = async (url: any, init: any) => { seen.push(JSON.parse(init?.body as string)); return baseFetch(url, init); };
+  try {
+    const { response } = await run("/v1/messages", { model: "partner", max_tokens: 16,
+      tools: [{ name: "t", input_schema: { type: "object" }, eager_input_streaming: true }],
+      messages: [{ role: "user", content: "Hi" }] });
+    assert.equal(response.status, 200);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].tools[0].name, "t");
+    assert.deepEqual(seen[0].tools[0].input_schema, { type: "object" });
+    assert.equal(seen[0].tools[0].eager_input_streaming, undefined);
+  } finally {
+    globalThis.fetch = baseFetch;
+    delete env.UPSTREAM_STRIP_TOOL_FIELDS;
+    rejectedToolFields.clear();
+  }
+});
+test("UPSTREAM_STRIP_TOOL_FIELDS pre-strips before the first send, no learning 400", async () => {
+  rejectedToolFields.clear();
+  env.UPSTREAM_STRIP_TOOL_FIELDS = "eager_input_streaming, cache_control";
+  const baseFetch = globalThis.fetch;
+  const seen: any[] = [];
+  globalThis.fetch = async (url: any, init: any) => { seen.push(JSON.parse(init?.body as string)); return baseFetch(url, init); };
+  try {
+    const { response } = await run("/v1/messages", { model: "partner", max_tokens: 16,
+      tools: [{ name: "t", input_schema: { type: "object" }, eager_input_streaming: true,
+        cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "Hi" }] });
+    assert.equal(response.status, 200);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].tools[0].eager_input_streaming, undefined);
+    assert.equal(seen[0].tools[0].cache_control, undefined);
+  } finally {
+    globalThis.fetch = baseFetch;
+    delete env.UPSTREAM_STRIP_TOOL_FIELDS;
+    rejectedToolFields.clear();
+  }
 });
 test("Queue failure falls back to D1; successful duplicate cannot overwrite complete record", async () => {
   await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Hi" }] });
@@ -331,7 +606,7 @@ test("Queue failure falls back to D1; successful duplicate cannot overwrite comp
   await dispatchExchange(env, queue[0]);
   await persistExchange(env, { ...queue[0], assistantText: "different retry" });
   assert.equal(count("gateway_exchanges"), 1); assert.equal(count("messages"), 2);
-  assert.equal(sqlite.prepare("SELECT assistant_text FROM gateway_exchanges").get()!.assistant_text, "你好，记住了。");
+  assert.equal((sqlite.prepare("SELECT assistant_text FROM gateway_exchanges").get() as any).assistant_text, "你好，记住了。");
 });
 
 test("a topical follow-up does not inject the previous relationship precious", async () => {
@@ -392,8 +667,23 @@ test("please-remember writes the original words into long-term memory", async ()
       { role: "user", content: "调试暗号是什么？" }
     ]
   });
+  assert.equal(ask.response.headers.get("x-aelios-memory"), "empty");
+  assert.doesNotMatch(JSON.stringify(calls[1].query.messages), /Aelios 记忆/);
+});
+
+test("evidence recall keeps a distilled memory instead of repeating its source quote", async () => {
+  await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [{ role: "user", content: "请记住调试暗号是芝麻开门" }]
+  });
+  const ask = await run("/v1/chat/completions", {
+    model: "partner",
+    messages: [{ role: "user", content: "调试暗号是什么？" }]
+  });
   assert.equal(ask.response.headers.get("x-aelios-memory"), "injected");
-  assert.match(JSON.stringify(calls[1].query.messages), /\[quote\].*芝麻开门|\[authored\].*芝麻开门/);
+  const injected = JSON.stringify(calls[1].query.messages);
+  assert.match(injected, /回答旧事：「调试暗号是芝麻开门」/);
+  assert.doesNotMatch(injected, /请记住调试暗号|用户: 「/);
 });
 
 test("CF chat rides compat with the gateway id in the URL; custom upstreams stay bearer-only", async () => {
@@ -514,6 +804,21 @@ test("read-space configuration is backwards compatible, bounded, explicit and ro
   assert.deepEqual(JSON.parse((await run("/api/gateway/config")).text).identities[0].readNamespaces, ["old", "shared", "new"]);
 });
 
+test("identity speaker names are optional, bounded, and used by the matching write space", async () => {
+  assert.equal(speakersForNamespace(config() as any, "partner-a"), null);
+  for (const bad of ["", " \n ", "n".repeat(33), "a\nb"]) {
+    assert.throws(() => validateConfig({ ...config(), identities: [{ ...identity(), userName: bad }] }), /userName/);
+  }
+  const named = { ...config(), identities: [{ ...identity(), userName: "小南", assistantName: "小北" }] };
+  const saved = validateConfig(named);
+  assert.deepEqual(speakersForNamespace(saved, "partner-a"), { userName: "小南", assistantName: "小北" });
+  assert.equal(speakersForNamespace(saved, "other"), null);
+  const slugFallback = validateConfig({ ...config(), identities: [{ ...identity(), userName: "小南" }] });
+  assert.equal(speakersForNamespace(slugFallback, "partner-a")?.assistantName, "partner");
+  assert.equal((await worker.fetch(request("/api/gateway/config", named, {}, "PUT"), env, ctx)).status, 200);
+  assert.deepEqual(JSON.parse((await run("/api/gateway/config")).text).identities[0].userName, "小南");
+});
+
 test("cross-space recall shares one budget, deduplicates and records provenance while writes stay in the new space", async () => {
   const updated = { ...config(), settings: { MEMORY_FILTER_MAX_OUTPUT: "3" }, identities: [{ ...identity(), namespace: "new", readNamespaces: ["old", "shared"] }] };
   setConfig(updated);
@@ -524,17 +829,19 @@ test("cross-space recall shares one budget, deduplicates and records provenance 
   assert.equal(response.status, 200);
   const prompt = calls[0].query.messages[0].content;
   assert.match(prompt, /Cloudflare old memory/);
-  assert.match(prompt, /Cloudflare shared memory/);
+  assert.doesNotMatch(prompt, /Cloudflare shared memory/);
   assert.doesNotMatch(prompt, /private memory|not in read list/);
-  assert.equal((prompt.match(/Cloudflare duplicate/g) || []).length, 1);
-  assert.equal((prompt.match(/- \[precious\]/g) || []).length, 3);
+  assert.equal((prompt.match(/Cloudflare duplicate/g) || []).length, 0);
+  assert.equal((prompt.match(/^-/gm) || []).length, 1);
   assert.equal(queue[0].namespace, "new");
   await persistExchange(env, queue[0]);
-  assert.deepEqual(sqlite.prepare("SELECT DISTINCT namespace FROM messages").all().map(r => r.namespace), ["new"]);
-  const trace = JSON.parse(sqlite.prepare("SELECT payload_json FROM memory_events WHERE event_type = 'recall_explain'").get()!.payload_json as string);
+  assert.deepEqual(sqlite.prepare("SELECT DISTINCT namespace FROM messages").all().map((r: any) => r.namespace), ["new"]);
+  const trace = JSON.parse((sqlite.prepare("SELECT payload_json FROM memory_events WHERE event_type = 'recall_explain'").get() as any).payload_json as string);
   assert.deepEqual(trace.read_namespaces, ["old", "shared"]);
   assert.equal(trace.write_namespace, "new");
-  assert.deepEqual([...new Set(trace.items.map((x: any) => x.namespace))].sort(), ["old", "shared"]);
+  assert.deepEqual([...new Set(trace.items.map((x: any) => x.namespace))], ["old"]);
+  assert.ok(trace.decisions.some((x: any) => x.namespace === "shared" && x.reason === "duplicate_content"));
+  assert.ok(trace.decisions.some((x: any) => x.namespace === "shared" && x.reason === "item_budget"));
 });
 
 test("two identities can share a space and disabled recall still records original utterances", async () => {
@@ -564,7 +871,7 @@ test("one unavailable space does not suppress healthy recall; trace lists the fa
     return statement;
   } };
   assert.equal((await run("/v1/chat/completions", { model: "partner", messages: [{ role: "user", content: "Cloudflare" }] })).response.headers.get("x-aelios-memory"), "injected");
-  const trace = JSON.parse(sqlite.prepare("SELECT payload_json FROM memory_events WHERE event_type = 'recall_explain'").get()!.payload_json as string);
+  const trace = JSON.parse((sqlite.prepare("SELECT payload_json FROM memory_events WHERE event_type = 'recall_explain'").get() as any).payload_json as string);
   assert.deepEqual(trace.failed_namespaces, ["broken"]);
 });
 
@@ -628,4 +935,110 @@ test("memory plus thinking survives the entire simulated tool loop with upstream
   assert.equal(third.response.headers.get("x-aelios-memory"), "injected");
   assert.equal(calls[2].query.messages.at(-1).content[0].type, "tool_result");
   assert.deepEqual(calls[2].query.messages.slice(0, -1), mixed.messages.slice(0, -1));
+});
+
+test("reranked recall is wired across sources and stays out of conversation storage", async () => {
+  await run("/v1/chat/completions", {model:"partner",messages:[{role:"user",content:"请记住你喜欢下雨天喝热豆浆"}]});
+  precious("partner-a", "下雨天，你答应永远找到旦九。");
+  precious("partner-b", "下雨天其他身份的秘密。");
+  const result=await run("/v1/chat/completions",{model:"partner",messages:[{role:"user",content:"下雨了，早餐吃点什么呢"}]});
+  assert.equal(result.response.headers.get("x-aelios-memory"),"injected");
+  const prompt=calls.at(-1).query.messages[0].content;
+  assert.match(prompt,/热豆浆/);assert.doesNotMatch(prompt,/永远|秘密|event_key/);
+  assert.equal((prompt.match(/^- /gm)||[]).length,1);
+  const history=await run("/api/gateway/recalls?identity=partner");
+  const records=JSON.parse(history.text).items;
+  const trace=records.find((r:any)=>r.selection?.status==="reranked");
+  assert.ok(trace.decisions.some((d:any)=>d.injected&&d.excerpt.includes("热豆浆")));
+});
+
+test("reranker failure continues the chat with a lexical fallback", async () => {
+  precious("partner-a","你喜欢雨天喝热豆浆。");
+  env.AI={async run(){throw new Error("down");}};
+  const result=await run("/v1/chat/completions",{model:"partner",messages:[{role:"user",content:"雨天喝什么"}]});
+  assert.equal(result.response.status,200);assert.equal(result.response.headers.get("x-aelios-memory"),"injected");
+  assert.match(calls.at(-1).query.messages[0].content,/热豆浆/);
+  const rows=JSON.parse((await run("/api/gateway/recalls?identity=partner")).text).items;
+  assert.equal(rows[0].selection.status,"lexical");assert.equal(rows[0].selection.reason,"reranker_failed");
+  assert.equal((await run("/api/gateway/recalls?identity=partner",undefined,{authorization:"Bearer im-key"})).response.status,401);
+  assert.equal((await run("/api/gateway/recalls?identity=missing")).response.status,400);
+});
+
+test("recall history filters identities sharing the same write space", async () => {
+  setConfig({...config(),identities:[identity(),{...identity(),slug:"other"}]});
+  precious("partner-a","你喜欢 Cloudflare。");
+  await run("/partner/v1/chat/completions",{model:"partner",messages:[{role:"user",content:"Cloudflare 怎么样"}]});
+  await run("/other/v1/chat/completions",{model:"partner",messages:[{role:"user",content:"Cloudflare 好用吗"}]});
+  const rows=JSON.parse((await run("/api/gateway/recalls?identity=partner")).text).items;
+  assert.equal(rows.length,1);assert.equal(rows[0].identity,"partner");
+});
+
+test('retired gateway page redirects to the unified admin without reading credentials or configuration', async () => {
+  const response = await worker.fetch(new Request('https://aelios.test/admin/gateway'), {} as any, ctx);
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get('location'), '/admin');
+  assert.equal(await response.text(), '');
+});
+
+test("default recall batches ordinary memories and precious across spaces once, and exposes scores", async () => {
+  setConfig({...config(),identities:[{...identity(),readNamespaces:["partner-a","shared"]}]});
+  precious("shared","Cloudflare 还有一条珍贵回忆。");
+  precious("private","Cloudflare 其他空间的秘密。");
+  sqlite.prepare(`INSERT INTO memories (id, namespace, type, content, importance, confidence, created_at, updated_at)
+    VALUES ('rank-fact', 'partner-a', 'fact', 'Cloudflare 是我们用的记忆平台。', 1, 1, '2026-09-06', '2026-09-06')`).run();
+  let rankingCalls=0;
+  env.AI.run=async(model:string,data:any)=>{
+    if(!model.includes("reranker"))throw new Error("embedding unavailable in test");
+    rankingCalls++;
+    assert.ok(data.contexts.some((c:any)=>c.text.includes("记忆平台")));
+    assert.ok(data.contexts.some((c:any)=>c.text.includes("珍贵回忆")));
+    assert.ok(data.contexts.every((c:any)=>!c.text.includes("秘密")));
+    return {response:data.contexts.map((c:any,id:number)=>({id,score:c.text.includes("记忆平台")?0.92:0.2}))};
+  };
+  const result=await run("/v1/chat/completions",{model:"partner",messages:[{role:"user",content:"Cloudflare 平台"}]});
+  assert.equal(result.response.status,200);assert.equal(rankingCalls,1);assert.equal(calls.length,1);
+  assert.match(calls[0].query.messages[0].content,/记忆平台/);
+  assert.doesNotMatch(calls[0].query.messages[0].content,/珍贵回忆|秘密|rank-fact|0.92/);
+  const trace=JSON.parse((await run("/api/gateway/recalls?identity=partner")).text).items[0];
+  assert.equal(trace.selection.status,"reranked");assert.equal(trace.selection.threshold,0.25);
+  assert.ok(Number.isFinite(trace.selection.elapsed_ms));
+  assert.ok(trace.decisions.some((d:any)=>d.score===0.92&&d.injected));
+  assert.ok(trace.decisions.some((d:any)=>d.score===0.2&&!d.injected));
+  assert.equal(queue.length,1);assert.equal(queue[0].userText,"Cloudflare 平台");
+});
+test("Workers AI failure continues the chat with a lexical fallback", async () => {
+  precious("partner-a","你喜欢 Cloudflare。");
+  env.AI.run=async()=>{throw new Error("not available");};
+  const result=await run("/v1/chat/completions",{model:"partner",messages:[{role:"user",content:"Cloudflare 好用吗"}]});
+  assert.equal(result.response.status,200);assert.equal(result.response.headers.get("x-aelios-memory"),"injected");
+  assert.match(calls[0].query.messages[0].content,/Cloudflare/);
+  const trace=JSON.parse((await run("/api/gateway/recalls?identity=partner")).text).items[0];
+  assert.equal(trace.selection.status,"lexical");assert.equal(trace.selection.reason,"reranker_failed");assert.equal(queue.length,1);
+});
+test("keeping a candidate back to pending does not wipe its target memory link", async () => {
+  const { updateMemoryCandidateStatus } = await import("../src/db/v2/candidates");
+  sqlite.prepare(`INSERT INTO memory_candidates
+    (id, namespace, type, content, confidence, importance, source, status, target_memory_id, decision_note, created_at, updated_at)
+    VALUES (?, ?, 'fact', '调试暗号换成芝麻关门', 0.6, 0.6, 'dream_update', 'pending', ?, ?, ?, ?)`)
+    .run("cand_keep", "partner-a", "mem_old", "extracted", "2026-09-06", "2026-09-06");
+
+  // judge 的 keep 分支只传 status 和 decisionNote，不传 targetMemoryId。
+  const kept = await updateMemoryCandidateStatus(db, {
+    namespace: "partner-a",
+    id: "cand_keep",
+    status: "pending",
+    decisionNote: "judge: 说不准，留给人工"
+  });
+  assert.equal(kept?.target_memory_id, "mem_old");
+  assert.equal(kept?.decision_note, "judge: 说不准，留给人工");
+
+  // 显式传 null 仍然是清空。
+  const cleared = await updateMemoryCandidateStatus(db, {
+    namespace: "partner-a",
+    id: "cand_keep",
+    status: "pending",
+    targetMemoryId: null
+  });
+  assert.equal(cleared?.target_memory_id, null);
+  assert.equal(cleared?.decision_note, "judge: 说不准，留给人工");
 });

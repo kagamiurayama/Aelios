@@ -29,8 +29,12 @@ import { filterAndCompressMemories } from "../filter";
 import { createEmbedding } from "../embedding";
 import { shapeRecallQuery } from "../queryShape";
 import { expandRecallByRelations, isRelationExpansionEnabled } from "../relations";
+import { fetchTriggeredRecords, isTriggerRecallEnabled, recallByTriggers } from "../triggers";
 import type { RelationExpansionMeta } from "../relations";
 import { loadSpontaneousForBoot } from "../perception";
+import { getYesterdayDateLabel } from "../dreamDates";
+import { readDreamTimeZone } from "../dreamEnv";
+import { formatDateLabel } from "../../utils/time";
 import type { Env, PerceptionCacheItem } from "../../types";
 
 // --- 开关 ---
@@ -87,12 +91,7 @@ function weekBlockLimit(env: Env): number {
 function dateLabelInTimeZone(iso: string, timeZone: string): string | null {
   const ts = Date.parse(iso);
   if (!Number.isFinite(ts)) return null;
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(new Date(ts));
+  return formatDateLabel(new Date(ts), timeZone);
 }
 
 function decayForLastInjected(
@@ -209,12 +208,8 @@ export async function buildBootPackage(
     return cached.value;
   }
 
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const bootTimeZone = env.DREAM_TIME_ZONE || "Asia/Shanghai";
-  const yesterdayLabel = new Intl.DateTimeFormat("en-CA", {
-    timeZone: bootTimeZone,
-    year: "numeric", month: "2-digit", day: "2-digit"
-  }).format(yesterday);
+  const bootTimeZone = readDreamTimeZone(env);
+  const yesterdayLabel = getYesterdayDateLabel(bootTimeZone);
 
   const [preciousRows, allGlossary, dailyLog, weeklyRows, monthlyRows, spontaneous] = await Promise.all([
     input.preciousRows
@@ -330,6 +325,8 @@ export interface RecallInput {
   waitUntil?: (promise: Promise<unknown>) => void;
   // Gateway applies the unified surface budget first, then marks only those ids.
   skip_inject_mark?: boolean;
+  // False = nomination pool for a later reranker. Default true for explicit search.
+  grounded?: boolean;
   // Week diaries are impressions, not evidence. Only attach when the question is temporal.
   attach_week_blocks?: boolean;
 }
@@ -354,6 +351,11 @@ export interface RecallHit {
   // E 轴: 亲笔署名与响应倾向 (0011)。authored 命中吃排序加成，供面板观察。
   authored_by?: string | null;
   response_tendency?: string | null;
+  // Keep recording time separate from effective/event time for evidence selection.
+  recorded_date?: string | null;
+  event_date?: string | null;
+  fact_key?: string | null;
+  source_message_ids?: string[];
   // LMC-5 Y 轴 (additive, only when RELATION_EXPANSION on and hit came via edge)
   relation?: RelationExpansionMeta;
   contradicted_by?: string[];
@@ -428,16 +430,49 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
     types: input.types,
     topK: k,
     includeHistory: input.include_history === true,
-    waitUntil: input.waitUntil
+    waitUntil: input.waitUntil,
+    grounded: input.grounded !== false,
+    skipRecallMark: input.skip_inject_mark === true || input.grounded === false
   });
-  const rawMemories: MemoryApiRecordWithProvenance[] = searchResult.records;
+  // 复制一份：下面触发器通道会往池子里 push，不要改到 searchResult 自己的数组。
+  const rawMemories: MemoryApiRecordWithProvenance[] = [...searchResult.records];
+
+  // 2.25 触发器通道 (入口扩展，默认 off)。
+  // 与 4.5 的 relation 扩展分工：那边从已召回的种子往外走，是出口扩展，种子为空时
+  // 它什么也做不了；这边把本来进不了候选池的记忆送进来——问题和记忆语义相关但几乎
+  // 不共享词汇的那一类，主检索第一跳就空了，触发器是唯一还能把它捞回来的路。
+  //
+  // 只 union，不改已有命中的分和顺序。新进来的记忆和别的候选一样，要过 2.5 的
+  // reranker 和闸四才算数——这条通道负责"让它有机会被看见"，不负责"让它赢"。
+  if (isTriggerRecallEnabled(env)) {
+    try {
+      const outcome = await recallByTriggers(env, {
+        namespace: input.namespace,
+        query: shaped.embeddingQuery
+      });
+      if (outcome.triggered) {
+        const extra = await fetchTriggeredRecords(env, {
+          namespace: input.namespace,
+          outcome,
+          existingIds: new Set(rawMemories.map((m) => m.id)),
+          includeHistory: input.include_history === true
+        });
+        rawMemories.push(...extra);
+      }
+    } catch (error) {
+      console.error("trigger recall failed; using seed pool", error);
+    }
+  }
   // 严格模式下 (RECALL_REQUIRE_D1_BACKING=true) 已经在 search 层丢弃的孤儿向量命中数。
   const unbackedDropped = searchResult.unbacked_dropped;
 
-  // 2.5. 召回精炼: prepareCandidates + reranker，记忆原文直出
+  // 2.5. Rank with the reranker, but do not apply the auto-injection
+  // 2-item budget here. MCP / REST active recall needs the full k;
+  // the gateway surface trims after this.
   const memories = (await filterAndCompressMemories(env, {
     query,
-    memories: rawMemories
+    memories: rawMemories,
+    maxOutput: k
   })) as MemoryApiRecordWithProvenance[];
 
   // 3. 闸三: last_injected_at 近期注入过的降权 (不动 importance)。
@@ -467,7 +502,11 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
       backed: m.backed,
       kind: "memory" as const,
       authored_by: authored,
-      response_tendency: m.response_tendency ?? null
+      response_tendency: m.response_tendency ?? null,
+      recorded_date: m.created_at ?? null,
+      event_date: m.valid_as_of ?? null,
+      fact_key: m.fact_key ?? null,
+      source_message_ids: m.source_message_ids
     };
   });
 
@@ -524,6 +563,9 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   const flooredIds: string[] = [];
   const allHits = beforeFloor
     .filter((hit) => {
+      // Nomination pools stay wide for the later reranker. Explicit search
+      // still drops scores that only cleared the padded lexical floor.
+      if (input.grounded === false) return true;
       if ((hit.raw_score ?? hit.score) >= minScore) return true;
       flooredIds.push(hit.id);
       return false;
@@ -602,7 +644,7 @@ export async function collectWeekBlocks(
     excludeWeeks?: string[];
   }
 ): Promise<RecallWeekBlock[]> {
-  const timeZone = env.DREAM_TIME_ZONE || "Asia/Shanghai";
+  const timeZone = readDreamTimeZone(env);
 
   const seedsByWeek = new Map<string, string[]>();
   for (const hit of input.hits) {

@@ -2,7 +2,10 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import {
+  hasLexicalSupport,
   isThinQuery,
+  keepGroundedHits,
+  lexicalHitScore,
   lexicalOverlapScore,
   mergeHybridRanks,
   selectRelevantPrecious,
@@ -17,7 +20,7 @@ import {
   classifyRememberUtterance,
   parseRememberNow
 } from "../src/memory/rememberNow";
-import { excerptAroundMatch, formatQuote, quoteOverlaps, searchQuotes } from "../src/memory/quotes";
+import { excerptAroundMatch, formatQuote, keepUncoveredQuotes, quoteOverlaps, searchQuotes } from "../src/memory/quotes";
 import { isEvidenceQuery, isTemporalQuery, tokenizeForIndex } from "../src/memory/queryShape";
 import { searchMemoriesByText } from "../src/db/memories";
 import { backfillFts, rebuildFts, toFtsBody } from "../src/memory/fts";
@@ -28,8 +31,9 @@ import {
   judgeKindFor,
   buildJudgePrompt
 } from "../src/memory/candidateJudge";
-import { recentHumanTexts } from "../src/gateway/protocol";
+import { classifyTurn, recentHumanTexts } from "../src/gateway/protocol";
 import type { MemoryCandidateRow } from "../src/db/v2/candidates";
+import { cleanMessageText } from "../src/utils/sanitize";
 
 test("topical questions do not mix the previous turn into lexical tokens", () => {
   const shaped = shapeRecallQuery({
@@ -76,10 +80,139 @@ test("surface is markdown, not a JSON blob", () => {
     { kind: "precious", content: "喜欢 Cloudflare" },
     { kind: "project", content: "你正在做记忆网关" }
   ]);
-  assert.match(text, /\[Aelios memory reference/);
-  assert.match(text, /- \[precious\] 喜欢 Cloudflare/);
-  assert.match(text, /- \[project\] 你正在做记忆网关/);
+  assert.match(text, /\[Aelios 记忆/);
+  assert.match(text, /- 喜欢 Cloudflare/);
+  assert.match(text, /- 你正在做记忆网关/);
+  assert.doesNotMatch(text, /\[(?:precious|project)\]/);
   assert.doesNotMatch(text, /\[\{"kind"/);
+});
+
+test("transport envelopes are removed without eating ordinary prose", () => {
+  const hash = "9fc3ec3b7f584cdfbfe84f72300e8f08";
+  const id = "7812076508172213971";
+  assert.equal(
+    cleanMessageText(`<message from="${hash}" msg_id="${id}">迁企微、宁皎搬好了</message>`),
+    "迁企微、宁皎搬好了"
+  );
+  assert.equal(
+    cleanMessageText(`<message from="${hash}" msg_id="1">迁企微</message>\n<message from="${hash}" msg_id="2">宁皎搬好了</message>`),
+    "迁企微\n宁皎搬好了"
+  );
+  assert.equal(cleanMessageText(`from=${hash} msg_id=${id}\n迁企微、宁皎搬好了`), "迁企微、宁皎搬好了");
+  assert.equal(cleanMessageText("文档里可以写 <message>正文</message>"), "文档里可以写 <message>正文</message>");
+  assert.equal(
+    cleanMessageText(`<wecom-message from="${hash}" msg_id="${id}">今晚吃什么</wecom-message>`),
+    "今晚吃什么"
+  );
+  assert.equal(
+    cleanMessageText(`<wecom-message from="${hash}" msg_id="${id}">未闭合的企微`),
+    "未闭合的企微"
+  );
+  assert.equal(
+    cleanMessageText(`请看 <wecom-message from="${hash}" msg_id="${id}">迁企微</wecom-message> 然后呢`),
+    "请看 迁企微 然后呢"
+  );
+});
+
+test("client recap and system-reminder are not treated as user speech", () => {
+  assert.equal(cleanMessageText("<recap>\nUser stepped away; returning. Recap: <40 words.</recap>"), "");
+  assert.equal(cleanMessageText("<recap>\nUser stepped away; returning. Recap: <40 words."), "");
+  assert.equal(
+    cleanMessageText("<system-reminder>\nToday: 2026-09-07; current working directory: '/home/box/home'</system-reminder>"),
+    ""
+  );
+  assert.equal(
+    cleanMessageText("今晚吃什么\n<system-reminder>\nToday: 2026-09-07; current working directory: '/tmp'</system-reminder>"),
+    "今晚吃什么"
+  );
+  assert.equal(
+    cleanMessageText("User stepped away; returning. Recap: <40 words."),
+    ""
+  );
+  assert.equal(cleanMessageText("帮我写个 recap：今天做了什么"), "帮我写个 recap：今天做了什么");
+  assert.equal(cleanMessageText("已回她。"), "");
+  assert.equal(cleanMessageText("已回他"), "");
+  assert.equal(cleanMessageText("今晚吃什么\n已回她。"), "今晚吃什么");
+  assert.equal(cleanMessageText("我跟她说已回她了"), "我跟她说已回她了");
+});
+
+test("recent history skips recap turns so thin queries do not inherit them", () => {
+  const texts = recentHumanTexts({
+    messages: [
+      { role: "user", content: "<recap>\nUser stepped away; returning. Recap: <40 words." },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "那个呢？" }
+    ]
+  }, "chat");
+  assert.deepEqual(texts, ["那个呢？"]);
+});
+
+test("classifyTurn treats machine-only user payloads as auxiliary", () => {
+  const recap = classifyTurn({
+    messages: [{ role: "user", content: "<recap>\nUser stepped away; returning. Recap: <40 words." }]
+  }, "chat");
+  assert.equal(recap.kind, "auxiliary");
+  assert.equal(recap.text, "");
+  const wecom = classifyTurn({
+    messages: [{ role: "user", content: '<wecom-message from="abc" msg_id="1">今晚吃什么</wecom-message>' }]
+  }, "chat");
+  assert.equal(wecom.kind, "human");
+  assert.equal(wecom.text, "今晚吃什么");
+});
+
+test("automatic surfaces hide ids and message envelopes", () => {
+  const surface = assembleRecallSurface([
+    {
+      kind: "quote",
+      id: "msg_7812076508172213971",
+      sourceIds: ["msg_1", "msg_2"],
+      content: '<message from="9fc3ec3b" msg_id="7812076508172213971">迁企微、宁皎搬好了</message>'
+    }
+  ]);
+  assert.equal(surface.entries[0].id, "msg_7812076508172213971");
+  assert.deepEqual(surface.entries[0].sourceIds, ["msg_1", "msg_2"]);
+  assert.match(surface.text, /- 迁企微、宁皎搬好了/);
+  assert.doesNotMatch(surface.text, /9fc3ec3b|7812076508172213971|msg_1|\[quote\]/);
+});
+
+test("quotes already covered by a memory are dropped", () => {
+  const quotes = [
+    { id: "q1", content: "请记住调试暗号是芝麻开门", excerpt: "请记住调试暗号是芝麻开门" },
+    { id: "q2", content: "昨天吃了番茄炒蛋", excerpt: "昨天吃了番茄炒蛋" }
+  ];
+  const { kept, dropped } = keepUncoveredQuotes(quotes, ["调试暗号是芝麻开门"]);
+  assert.deepEqual(dropped.map((quote) => quote.id), ["q1"]);
+  assert.deepEqual(kept.map((quote) => quote.id), ["q2"]);
+});
+
+test("lexical hit score does not pad a one-token scrape to 0.4125", () => {
+  const tokens = ["脚本", "路径", "残留", "清理", "文件", "仓库", "提交", "测试"];
+  assert.equal(lexicalHitScore("Aelios 是七月的定位裁定", "清理那个脚本", tokens), 0);
+  const oneOfEight = lexicalHitScore("仓库里还有旧文档", "清理那个脚本", tokens);
+  assert.ok(oneOfEight < 0.15);
+  assert.notEqual(Number(oneOfEight.toFixed(4)), 0.4125);
+  const grounded = lexicalHitScore("请清理那个脚本再提交测试文件", "清理那个脚本", tokens);
+  assert.ok(grounded >= 0.5);
+  assert.ok(grounded > oneOfEight);
+  assert.equal(lexicalHitScore("完全无关", "清理那个脚本", []), 0);
+});
+
+test("grounded hits refuse centroid padding and keep a short real list", () => {
+  const tokens = tokenizeQuery("那个脚本还在仓库里吗");
+  const centroid = Array.from({ length: 10 }, (_, i) => ({
+    id: `old-${i}`,
+    content: "Aelios 定位：分层长期记忆内核，七月七日裁定。",
+    score: 0.4125
+  }));
+  assert.deepEqual(keepGroundedHits(centroid, tokens, 10), []);
+
+  const mixed = [
+    { id: "script", content: "清理脚本已经从仓库删掉了，只留过 system prompt 残留路径。", score: 0.78 },
+    ...centroid
+  ];
+  const queryTokens = tokenizeQuery("清理脚本还在仓库里吗");
+  assert.deepEqual(keepGroundedHits(mixed, queryTokens, 10).map((row) => row.id), ["script"]);
+  assert.ok(hasLexicalSupport(mixed[0].content, queryTokens));
 });
 
 test("RRF keeps a lexical hit that the vector channel missed", () => {
@@ -124,9 +257,9 @@ test("token lexical search matches a phrase the full query would miss", async ()
   const db = {
     prepare(sql: string) {
       const statement = sqlite.prepare(sql);
-      let args: unknown[] = [];
+      let args: any[] = [];
       const api = {
-        bind(...values: unknown[]) { args = values; return api; },
+        bind(...values: any[]) { args = values; return api; },
         async all() { return { results: statement.all(...args) }; }
       };
       return api;
@@ -202,6 +335,44 @@ test("reranker errors fail closed unless MEMORY_FILTER_FAIL_OPEN is true", async
   assert.equal(opened.meta.fallback_used, true);
 });
 
+test("active recall can keep more than the auto-injection two-item budget", async () => {
+  const memories = [0, 1, 2, 3, 4].map((index) => ({
+    id: `mem_${index}`,
+    namespace: "n",
+    type: "note",
+    content: `调试暗号相关事实 ${index} 还有足够长的正文方便核对`,
+    summary: null,
+    importance: 0.8,
+    confidence: 0.8,
+    status: "active",
+    pinned: false,
+    tags: [],
+    source: "dream",
+    source_message_ids: [],
+    vector_id: null,
+    last_recalled_at: null,
+    recall_count: 0,
+    created_at: "2026-09-01",
+    updated_at: "2026-09-01",
+    expires_at: null,
+    score: 0.9
+  }));
+  const env = {
+    ENABLE_MEMORY_FILTER: "true",
+    ENABLE_MEMORY_RERANKER: "false",
+    MEMORY_FILTER_MAX_OUTPUT: "2"
+  } as any;
+  const auto = await filterAndCompressMemoriesWithMeta(env, { query: "调试暗号", memories: memories as any });
+  assert.equal(auto.data.length, 2);
+  const active = await filterAndCompressMemoriesWithMeta(env, {
+    query: "调试暗号",
+    memories: memories as any,
+    maxOutput: 5
+  });
+  assert.equal(active.data.length, 5);
+  assert.ok(active.data.every((row) => row.id && row.content.includes("调试暗号相关事实")));
+});
+
 test("same-timestamp messages are not skipped after a mid-batch cut", async () => {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(`CREATE TABLE messages (
@@ -214,9 +385,9 @@ test("same-timestamp messages are not skipped after a mid-batch cut", async () =
   const db = {
     prepare(sql: string) {
       const statement = sqlite.prepare(sql);
-      let args: unknown[] = [];
+      let args: any[] = [];
       const api = {
-        bind(...values: unknown[]) { args = values; return api; },
+        bind(...values: any[]) { args = values; return api; },
         async all() { return { results: statement.all(...args) }; }
       };
       return api;
@@ -275,9 +446,9 @@ test("raw utterances are searchable before they become facts", async () => {
   const db = {
     prepare(sql: string) {
       const statement = sqlite.prepare(sql);
-      let args: unknown[] = [];
+      let args: any[] = [];
       const api = {
-        bind(...values: unknown[]) { args = values; return api; },
+        bind(...values: any[]) { args = values; return api; },
         async all() { return { results: statement.all(...args) }; },
         async first() { return statement.get(...args) || null; },
         async run() { return { meta: { changes: statement.run(...args).changes } }; }
@@ -288,6 +459,61 @@ test("raw utterances are searchable before they become facts", async () => {
   const hits = await searchQuotes(db as any, { namespace: "ns", query: "调试暗号是什么？" });
   assert.ok(hits.some((hit) => hit.content.includes("芝麻开门")));
   assert.match(formatQuote(hits[0]), /2026-09-06 用户: 「请记住调试暗号是芝麻开门」/);
+  sqlite.close();
+});
+
+test("adjacent quote hits from one conversation consume one recall slot", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
+    source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
+  )`);
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "msg_move", "conversation_one", "ns", "user",
+    '<message from="9fc3ec3b" msg_id="7812076508172213971">我准备迁企微</message>',
+    "gw", "2026-09-06T12:00:00.000Z", 0
+  );
+  sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "msg_done", "conversation_one", "ns", "assistant",
+    "宁皎已经搬好了", "gw", "2026-09-06T12:00:20.000Z", 1
+  );
+  const hits = await searchQuotes(wrapSqlite(sqlite) as any, {
+    namespace: "ns",
+    query: "迁企微 宁皎搬好",
+    limit: 2
+  });
+  assert.equal(hits.length, 1);
+  assert.deepEqual(hits[0].source_ids, ["msg_move", "msg_done"]);
+  assert.match(formatQuote(hits[0], { compact: true }), /迁企微.*宁皎.*搬好/);
+  assert.doesNotMatch(hits[0].content, /from=|msg_id=|7812076508172213971/);
+  sqlite.close();
+});
+
+test("gateway role-local seq does not collapse a multi-minute conversation", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, namespace TEXT, role TEXT, content TEXT,
+    source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
+  )`);
+  const insert = sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  // Gateway persist writes user=0 / assistant=1 on every turn.
+  insert.run("u1", "gw_session", "ns", "user", "我准备迁企微", "gw", "2026-09-06T12:00:00.000Z", 0);
+  insert.run("a1", "gw_session", "ns", "assistant", "好，宁皎那边我来搬", "gw", "2026-09-06T12:00:20.000Z", 1);
+  insert.run("u2", "gw_session", "ns", "user", "登录账号怎么办", "gw", "2026-09-06T12:01:10.000Z", 0);
+  insert.run("a2", "gw_session", "ns", "assistant", "用宁皎原来的企微账号", "gw", "2026-09-06T12:01:40.000Z", 1);
+  insert.run("u3", "gw_session", "ns", "user", "那客户资料也迁过去吗", "gw", "2026-09-06T12:02:20.000Z", 0);
+  insert.run("a3", "gw_session", "ns", "assistant", "客户资料跟宁皎一起迁", "gw", "2026-09-06T12:03:00.000Z", 1);
+  const hits = await searchQuotes(wrapSqlite(sqlite) as any, {
+    namespace: "ns",
+    query: "迁企微 宁皎 账号 客户资料",
+    limit: 4
+  });
+  assert.ok(hits.length >= 2, `expected multiple events, got ${hits.length}`);
+  assert.ok(
+    hits.every((hit) => (hit.source_ids ?? [hit.id]).length <= 3),
+    JSON.stringify(hits.map((hit) => hit.source_ids))
+  );
+  assert.ok(!hits.some((hit) => (hit.source_ids ?? []).length === 6));
   sqlite.close();
 });
 
@@ -303,9 +529,9 @@ test("quotes already visible in the request history are not recalled", async () 
   const db = {
     prepare(sql: string) {
       const statement = sqlite.prepare(sql);
-      let args: unknown[] = [];
+      let args: any[] = [];
       const api = {
-        bind(...values: unknown[]) { args = values; return api; },
+        bind(...values: any[]) { args = values; return api; },
         async all() { return { results: statement.all(...args) }; },
         async first() { return statement.get(...args) || null; },
         async run() { return { meta: { changes: statement.run(...args).changes } }; }
@@ -316,6 +542,9 @@ test("quotes already visible in the request history are not recalled", async () 
   const visible = await searchQuotes(db as any, { namespace: "ns", query: "调试暗号是什么？",
     excludeVisibleIn: "前面的话\n请记住调试暗号是芝麻开门\n后面的话" });
   assert.equal(visible.length, 0);
+  const enveloped = await searchQuotes(db as any, { namespace: "ns", query: "调试暗号是什么？",
+    excludeVisibleIn: '<message from="9fc3ec3b" msg_id="7812076508172213971">请记住调试暗号是芝麻开门</message>' });
+  assert.equal(enveloped.length, 0);
   const forgotten = await searchQuotes(db as any, { namespace: "ns", query: "调试暗号是什么？",
     excludeVisibleIn: "上下文压缩后只剩完全不相关的内容" });
   assert.ok(forgotten.some((hit) => hit.content.includes("芝麻开门")));
@@ -354,9 +583,9 @@ function wrapSqlite(sqlite: DatabaseSync) {
   return {
     prepare(sql: string) {
       const statement = sqlite.prepare(sql);
-      let args: unknown[] = [];
+      let args: any[] = [];
       const api = {
-        bind(...values: unknown[]) { args = values; return api; },
+        bind(...values: any[]) { args = values; return api; },
         async all() { return { results: statement.all(...args) }; },
         async first() { return statement.get(...args) || null; },
         async run() { return { meta: { changes: statement.run(...args).changes } }; }
@@ -402,6 +631,17 @@ test("judge does not archive a still-valid fact and rejects string booleans", ()
   };
   assert.equal(decideJudge("delete", goodFact, thresholds), "discard");
   assert.equal(decideJudge("add", goodFact, thresholds), "approve");
+
+  // 会过期但有据的事实交给人工，不再直接扔掉。
+  const datedFact = { ...goodFact, durable: false, reason: "对话里说了，但这是一次性的安排。" };
+  assert.equal(decideJudge("add", datedFact, thresholds), "keep");
+  assert.equal(decideJudge("update", datedFact, thresholds), "keep");
+  // 没有依据、或者分数本来就低的，照旧 discard。
+  assert.equal(decideJudge("add", { ...datedFact, grounded: false }, thresholds), "discard");
+  assert.equal(decideJudge("add", { ...datedFact, score: 0.2 }, thresholds), "discard");
+  // delete 侧不受影响：durable 在那边是"这条还好好的，别归档"的证据。
+  assert.equal(decideJudge("delete", { ...datedFact, shouldDelete: null }, thresholds), "keep");
+
   assert.equal(decideJudge("delete", { ...goodFact, shouldDelete: false, score: 0.99 }, thresholds), "discard");
   assert.equal(decideJudge("delete", {
     score: 0.91,
@@ -430,6 +670,30 @@ test("judge does not archive a still-valid fact and rejects string booleans", ()
   } as MemoryCandidateRow, []);
   assert.match(deletePrompt, /归档提案|应不应该删/);
   assert.doesNotMatch(deletePrompt, /score 高 = 值得新增/);
+
+  const named = buildJudgePrompt({
+    id: "cand_2",
+    namespace: "ns",
+    type: "fact",
+    content: "调试暗号是芝麻开门",
+    fact_key: "fact:pass",
+    confidence: 0.9,
+    importance: 0.9,
+    tags: "[]",
+    source_message_ids: "[]",
+    source: "dream_update",
+    status: "pending",
+    target_memory_id: "mem_1",
+    decision_note: null,
+    created_at: "2026-09-06",
+    updated_at: "2026-09-06"
+  } as MemoryCandidateRow, [{
+    id: "msg_1", conversation_id: "c", namespace: "ns", role: "user",
+    content: "改成这样", source: "test", created_at: "2026-09-06T00:00:00.000Z"
+  }], { userName: "小南", assistantName: "小北" });
+  assert.match(named, /用户是小南，助手是小北/);
+  assert.match(named, /\[msg_1\].*\[小南\]/);
+  assert.match(named, /小南用新内容明确修正了旧事实/);
 });
 
 test("FTS id hits keep SQL binds aligned and still find the rows", async () => {
@@ -527,8 +791,8 @@ test("FTS backfill indexes missing rows and can rebuild from source text", async
     source TEXT, created_at TEXT, seq INTEGER NOT NULL DEFAULT 0
   )`);
   memoriesSchema(sqlite);
-  sqlite.exec(`CREATE TABLE message_fts (fts_body TEXT, namespace TEXT, message_id TEXT)`);
-  sqlite.exec(`CREATE TABLE memory_fts (fts_body TEXT, namespace TEXT, memory_id TEXT)`);
+  sqlite.exec("CREATE TABLE message_fts (fts_body TEXT, namespace TEXT, message_id TEXT)");
+  sqlite.exec("CREATE TABLE memory_fts (fts_body TEXT, namespace TEXT, memory_id TEXT)");
   const long = `${"前面铺垫。".repeat(40)}最后才出现月亮邮局暗号。`;
   sqlite.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
     "msg_tail", "c", "ns", "user", long, "gw", "2026-09-06T12:00:00.000Z", 0
@@ -556,6 +820,6 @@ test("FTS backfill indexes missing rows and can rebuild from source text", async
   const rebuilt = await rebuildFts(db as any, { namespace: "ns", limit: 50 });
   assert.equal(rebuilt.messagesIndexed, 1);
   assert.equal(rebuilt.memoriesIndexed, 1);
-  assert.equal(sqlite.prepare("SELECT count(*) AS n FROM message_fts").get()!.n, 1);
+  assert.equal((sqlite.prepare("SELECT count(*) AS n FROM message_fts").get() as any).n, 1);
   sqlite.close();
 });

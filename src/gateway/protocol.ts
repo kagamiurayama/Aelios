@@ -1,5 +1,12 @@
 import { object, type Identity, type Protocol } from "./config";
+import { cleanMessageText } from "../utils/sanitize";
 
+/**
+ * Client request bodies are arbitrary JSON that this layer reads and rewrites field by field.
+ * Narrowing to `unknown` costs 77 type errors across the gateway and buys no safety the runtime
+ * guards here do not already provide.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: see above
 export type Body = Record<string, any>;
 export function visibleText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -24,7 +31,7 @@ export function recentHumanTexts(body: Body, protocol: Protocol, limit = 4): str
     const item = items[i];
     if (!object(item) || item.role !== "user") continue;
     if (item.type && !["message", "input_message"].includes(item.type)) continue;
-    const text = visibleText(item.content).trim();
+    const text = cleanMessageText(visibleText(item.content));
     if (!text) continue;
     texts.push(text);
   }
@@ -38,23 +45,26 @@ export function classifyTurn(body: Body, protocol: Protocol, auxiliary = false):
   if (auxiliary || !last) return { kind: "auxiliary", text: "", index };
   if (last.role === "tool" || /_call_output$/.test(last.type || "")) return { kind: "tool", text: "", index };
   if (last.role !== "user" || last.type && !["message", "input_message"].includes(last.type)) return { kind: "auxiliary", text: "", index };
-  const text = visibleText(last.content);
+  const raw = visibleText(last.content);
+  const text = cleanMessageText(raw);
   const blocks = Array.isArray(last.content) ? last.content : [];
   const tool = blocks.some(p => object(p) && p.type === "tool_result");
   if (tool && !text.trim()) return { kind: "tool", text: "", index };
+  // Recap / system-reminder / empty envelopes: not a user utterance.
+  if (!text.trim() && raw.trim()) return { kind: "auxiliary", text: "", index };
   return { kind: "human", text, index };
 }
 export function appendMemory(body: Body, protocol: Protocol, patch: string): Body {
   const copy = structuredClone(body);
   if (!patch) return copy;
   if (protocol === "responses" && typeof copy.input === "string") {
-    copy.input += "\n\n" + patch;
+    copy.input += `\n\n${patch}`;
     return copy;
   }
   const items = inputItems(copy, protocol);
   const last = items[items.length - 1];
   // Preserve every original content block and client cache_control marker.
-  if (typeof last.content === "string") last.content += "\n\n" + patch;
+  if (typeof last.content === "string") last.content += `\n\n${patch}`;
   else last.content = [...(last.content || []), { type: protocol === "responses" ? "input_text" : "text", text: patch }];
   return copy;
 }
@@ -92,32 +102,26 @@ export function sanitizeCacheControl(body: Body, protocol: Protocol): void {
   const last = lastCacheableBlock(body, true);
   if (object(last) && !last.cache_control) last.cache_control = cc;
 }
-// Identity-level automatic caching for clients that send no breakpoints at all
-// (rikkahub): mark the end of the system prefix plus the final turn's tail, so the
-// next turn cache-reads everything up to the previous tail. Any client-supplied
-// marker (top-level or block) wins and nothing is added.
-export function autoCacheBreakpoints(body: Body): boolean {
-  if (body.cache_control !== undefined) return false;
-  const marked = (v: unknown): boolean => Array.isArray(v) && v.some(b => object(b) && b.cache_control !== undefined);
-  if (marked(body.system) || marked(body.tools)) return false;
-  for (const m of body.messages ?? []) if (marked(m?.content)) return false;
-  const cc = { type: "ephemeral" };
-  let added = false;
-  if (typeof body.system === "string" && body.system) {
-    body.system = [{ type: "text", text: body.system, cache_control: cc }];
-    added = true;
-  } else if (Array.isArray(body.system)) {
-    for (let i = body.system.length - 1; i >= 0; i--) {
-      const block = body.system[i];
-      if (object(block) && CACHEABLE.has(block.type)) { block.cache_control = cc; added = true; break; }
-    }
+// Vertex-backed lines reject cache_control on tool definitions
+// (INVALID_ARGUMENT unrecognizedProperty=cache_control); system/user markers are fine.
+// Newer clients also stamp eager_input_streaming onto tool definitions; that field only
+// tunes tool-argument streaming granularity, so dropping it costs a little latency and
+// nothing else. Both are learned per upstream — see callGatewayUpstream.
+export const STRIPPABLE_TOOL_FIELDS: ReadonlySet<string> = new Set(["cache_control", "eager_input_streaming"]);
+/** A tool's identity, not a tuning knob: removing any of these ships a broken or useless tool. */
+export const PROTECTED_TOOL_FIELDS: ReadonlySet<string> = new Set(["name", "description", "input_schema", "type"]);
+/** Removing a field the tool never had reports false, so callers can tell a real retry from a no-op. */
+export function stripToolField(body: Body, field: string): boolean {
+  let stripped = false;
+  for (const tool of body.tools ?? []) {
+    if (object(tool) && tool[field] !== undefined) { delete tool[field]; stripped = true; }
   }
-  const tail = lastCacheableBlock(body, true);
-  if (tail && tail.cache_control === undefined && !(Array.isArray(body.system) && body.system.at(-1) === tail)) {
-    tail.cache_control = cc;
-    added = true;
-  }
-  return added;
+  return stripped;
+}
+/** Every `unrecognizedProperty=<name>` the upstream named, in its 400 detail. */
+export function rejectedFieldNames(detail: string): string[] {
+  const matches = detail.matchAll(/unrecognizedProperty=([A-Za-z_][A-Za-z0-9_]*)/g);
+  return [...new Set([...matches].map(match => match[1]))];
 }
 // Encrypted reasoning stays allowed; only server-owned history breaks request-only memory.
 export function hasServerState(body: Body, protocol: Protocol): boolean {
@@ -136,7 +140,7 @@ export function applyThinkingPolicy(body: Body, identity: Identity, protocol: Pr
 }
 // Fingerprints sort object keys without rewriting request payloads.
 export function canonical(value: unknown): string {
-  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
-  if (object(value)) return "{" + Object.keys(value).sort().map(k => JSON.stringify(k) + ":" + canonical(value[k])).join(",") + "}";
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (object(value)) return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";
 }
