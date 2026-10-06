@@ -31,6 +31,7 @@ function optionalIso(value: unknown): string | null {
 }
 
 function printableText(value: unknown, maxChars: number): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the whole point is detecting control characters
   if (typeof value !== "string" || value.length > maxChars || /[\u0000-\u001f\u007f]/u.test(value)) {
     throw new Error("runtime_status_contract_invalid");
   }
