@@ -630,7 +630,7 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
               <div>
                 <div class="flex items-center gap-2">
                   <i data-lucide="gauge" class="h-4 w-4 text-coral"></i>
-                  <h2 class="font-semibold">Kimi 额度</h2>
+                  <h2 class="font-semibold">模型额度</h2>
                 </div>
                 <p class="mt-1 text-xs text-zinc-400">只读显示；不会切换模型，也不会修改当前会话。</p>
               </div>
@@ -643,24 +643,29 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
             <div x-show="runtimeStatusError && !runtimeStatusLoading" class="mt-4 rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-coral" x-text="runtimeStatusError"></div>
 
             <div x-show="runtimeStatus && !runtimeStatusLoading" class="mt-4 space-y-3">
-              <div class="flex flex-wrap items-center gap-2 text-xs">
-                <span class="chip" :class="runtimeStatus && runtimeStatus.stale ? 'chip-warn' : 'chip-ok'" x-text="runtimeStatus && runtimeStatus.stale ? '数据可能陈旧' : '数据新鲜'"></span>
-                <span class="text-zinc-400" x-text="runtimeCollectedLabel()"></span>
-              </div>
-              <template x-if="runtimeStatus && runtimeStatus.windows.length === 0">
-                <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-zinc-400" x-text="runtimeStatus.errorLabel || 'Kimi 暂未返回额度窗口'"></div>
-              </template>
-              <template x-for="item in (runtimeStatus ? runtimeStatus.windows : [])" :key="item.id">
+              <template x-for="source in runtimeQuotaSources()" :key="source.id">
+                <section class="space-y-3 pt-2">
+                  <div class="flex flex-wrap items-center gap-2 text-xs">
+                    <h3 class="text-sm font-semibold" x-text="source.label"></h3>
+                    <span class="chip" :class="runtimeSourceStatus(source) === '数据新鲜' ? 'chip-ok' : 'chip-warn'" x-text="runtimeSourceStatus(source)"></span>
+                    <span class="text-zinc-400" x-text="runtimeCollectedLabel(source)"></span>
+                  </div>
+                  <template x-if="!source.available || source.windows.length === 0">
+                    <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-zinc-400" x-text="source.errorLabel || '额度暂不可用'"></div>
+                  </template>
+                  <template x-for="item in (source.available ? source.windows : [])" :key="item.id">
                 <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4">
                   <div class="flex items-baseline justify-between gap-3">
                     <div class="font-semibold" x-text="item.label"></div>
-                    <div class="text-xl font-semibold aurora-text" x-text="runtimePercentLabel(item)"></div>
+                    <div class="text-xl font-semibold aurora-text" x-text="(item.percentage.meaning === 'remaining' ? '剩余 ' : '已用 ') + runtimePercentLabel(item)"></div>
                   </div>
-                  <div class="runtime-progress mt-3" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="runtimeVisualPercent(item)">
+                  <div class="runtime-progress mt-3" role="progressbar" :aria-label="source.label + ' ' + item.label + (item.percentage.meaning === 'remaining' ? ' 剩余' : ' 已用')" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="runtimeVisualPercent(item)">
                     <span :style="'width:' + runtimeVisualPercent(item) + '%'"></span>
                   </div>
                   <div class="mt-2 text-xs text-zinc-400" x-text="runtimeResetLabel(item)"></div>
                 </div>
+                  </template>
+                </section>
               </template>
             </div>
           </article>
@@ -1461,12 +1466,17 @@ function memoryAdmin() {
     runtimeStatus: null,
     runtimeStatusLoading: false,
     runtimeStatusError: '',
+    runtimeNow: Date.now(),
+    runtimeClock: null,
 
     async init() {
       this.applyTheme();
       this.icons();
       await this.loadMemoryIdentities();
       await this.reloadAll();
+    },
+    destroy() {
+      if (this.runtimeClock) clearInterval(this.runtimeClock);
     },
     currentIdentity() {
       return this.memoryIdentities.find(idn => idn.slug === this.selectedIdentity);
@@ -2038,12 +2048,14 @@ function memoryAdmin() {
           const code = payload && payload.error;
           if (code === 'telegram_auth_failed') throw new Error('Telegram 身份已过期，请关闭后从阿朔私聊重新打开。');
           if (code === 'runtime_status_not_configured') throw new Error('运行状态尚未接通。');
-          throw new Error('Kimi 额度暂时读取失败，请稍后重试。');
+          throw new Error('额度暂时读取失败，请稍后重试。');
         }
         this.runtimeStatus = payload.data;
+        this.runtimeNow = Date.now();
+        if (!this.runtimeClock) this.runtimeClock = setInterval(() => { this.runtimeNow = Date.now(); }, 30000);
       } catch (error) {
         this.runtimeStatus = null;
-        this.runtimeStatusError = error && error.message ? error.message : 'Kimi 额度暂时读取失败，请稍后重试。';
+        this.runtimeStatusError = error && error.message ? error.message : '额度暂时读取失败，请稍后重试。';
       }
       this.runtimeStatusLoading = false;
       this.icons();
@@ -2051,6 +2063,16 @@ function memoryAdmin() {
     runtimePercentLabel(item) {
       const value = item && item.percentage ? Number(item.percentage.value) : NaN;
       return Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 1 }) + '%' : '—';
+    },
+    runtimeQuotaSources() {
+      if (!this.runtimeStatus) return [];
+      return this.runtimeStatus.quotaSources || [Object.assign({ id: 'kimi', label: 'Kimi', freshForSeconds: 120 }, this.runtimeStatus)];
+    },
+    runtimeSourceStatus(source) {
+      if (!source.available) return '读取失败';
+      const collected = Date.parse(source.collectedAt || '');
+      const age = this.runtimeNow - collected;
+      return source.stale || !Number.isFinite(collected) || age < -30000 || age > source.freshForSeconds * 1000 ? '数据可能陈旧' : '数据新鲜';
     },
     runtimeVisualPercent(item) {
       const value = item && item.percentage ? Number(item.percentage.value) : 0;
@@ -2060,16 +2082,16 @@ function memoryAdmin() {
       if (!item || !item.resetAt) return '下次重置：未知';
       const reset = new Date(item.resetAt);
       if (!Number.isFinite(reset.getTime())) return '下次重置：未知';
-      const remaining = Math.max(0, reset.getTime() - Date.now());
+      const remaining = Math.max(0, reset.getTime() - this.runtimeNow);
       const minutes = Math.floor(remaining / 60000);
       const days = Math.floor(minutes / 1440);
       const hours = Math.floor((minutes % 1440) / 60);
       const mins = minutes % 60;
-      return '下次重置：' + (days ? days + ' 天 ' : '') + (hours ? hours + ' 小时 ' : '') + mins + ' 分钟';
+      return '重置：' + reset.toLocaleString('zh-CN', { hour12: false }) + '（' + (days ? days + ' 天 ' : '') + (hours ? hours + ' 小时 ' : '') + mins + ' 分钟）';
     },
-    runtimeCollectedLabel() {
-      if (!this.runtimeStatus || !this.runtimeStatus.collectedAt) return '采集时间未知';
-      const collected = new Date(this.runtimeStatus.collectedAt);
+    runtimeCollectedLabel(source) {
+      if (!source || !source.collectedAt) return '采集时间未知';
+      const collected = new Date(source.collectedAt);
       return Number.isFinite(collected.getTime()) ? '采集于 ' + collected.toLocaleString('zh-CN', { hour12: false }) : '采集时间未知';
     },
     async loadWorldFacts() {

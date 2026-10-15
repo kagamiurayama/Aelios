@@ -94,6 +94,59 @@ export function projectAshuoRuntimePanel(raw: unknown): Record<string, unknown> 
     };
   });
 
+  // Optional extension: old daemons still return only the Kimi v0 root.
+  // Explicitly project each source so tokens/account fields cannot cross here.
+  let quotaSources: Record<string, unknown>[] | undefined;
+  if (raw.quotaSources !== undefined) {
+    if (!Array.isArray(raw.quotaSources) || raw.quotaSources.length < 1 || raw.quotaSources.length > 2) {
+      throw new Error("runtime_status_contract_invalid");
+    }
+    const seen = new Set<string>();
+    quotaSources = raw.quotaSources.map((source) => {
+      if (!isObject(source) || (source.id !== "kimi" && source.id !== "devin") || seen.has(source.id)) {
+        throw new Error("runtime_status_contract_invalid");
+      }
+      seen.add(source.id);
+      if (typeof source.available !== "boolean" || typeof source.stale !== "boolean" ||
+          !Number.isInteger(source.freshForSeconds) || Number(source.freshForSeconds) < 1 ||
+          Number(source.freshForSeconds) > 3600 || !Array.isArray(source.windows) ||
+          source.windows.length > (source.id === "devin" ? 2 : 4)) {
+        throw new Error("runtime_status_contract_invalid");
+      }
+      const expectedMeaning = source.id === "devin" ? "remaining" : "used";
+      const windowIds = new Set<string>();
+      const sourceWindows = source.windows.map((item) => {
+        if (!isObject(item) || !isObject(item.percentage) ||
+            item.percentage.meaning !== expectedMeaning || typeof item.percentage.value !== "number" ||
+            !Number.isFinite(item.percentage.value) ||
+            item.percentage.value < (source.id === "devin" ? 0 : -1_000_000) ||
+            item.percentage.value > (source.id === "devin" ? 100 : 1_000_000)) {
+          throw new Error("runtime_status_contract_invalid");
+        }
+        const id = printableText(item.id, 64);
+        if (windowIds.has(id) || (source.id === "devin" && id !== "devin_daily" && id !== "devin_weekly")) {
+          throw new Error("runtime_status_contract_invalid");
+        }
+        windowIds.add(id);
+        return {
+          id, label: printableText(item.label, 80),
+          percentage: { meaning: expectedMeaning, value: item.percentage.value },
+          resetAt: optionalIso(item.resetAt)
+        };
+      });
+      if (source.available && (sourceWindows.length === 0 || (source.id === "devin" && sourceWindows.length !== 2))) {
+        throw new Error("runtime_status_contract_invalid");
+      }
+      return {
+        id: source.id, label: source.id === "devin" ? "Devin" : "Kimi",
+        available: source.available, stale: source.stale,
+        errorLabel: printableText(source.errorLabel, 120),
+        collectedAt: optionalIso(source.collectedAt), freshForSeconds: source.freshForSeconds,
+        windows: source.available ? sourceWindows : []
+      };
+    });
+  }
+
   return {
     schema: PANEL_SCHEMA,
     residentId: RESIDENT_ID,
@@ -101,7 +154,8 @@ export function projectAshuoRuntimePanel(raw: unknown): Record<string, unknown> 
     stale: raw.stale,
     errorLabel: printableText(raw.errorLabel, 120),
     collectedAt: optionalIso(raw.collectedAt),
-    windows
+    windows,
+    ...(quotaSources ? { quotaSources } : {})
   };
 }
 
