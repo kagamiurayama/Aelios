@@ -118,3 +118,18 @@ test("old daemon continues rendering the original Kimi panel", () => {
   assert.equal(sources[0].id, "kimi");
   assert.equal(app.runtimeSourceStatus(sources[0]), "读取失败");
 });
+
+test("Devin stays first without mutating the response or hiding a failed provider", () => {
+  const { app } = appFixture();
+  for (const available of [true, false]) {
+    const failedOrReady = { ...devin, available, windows: available ? devin.windows : [] };
+    const original = Object.freeze([kimi, failedOrReady]);
+    app.runtimeStatus = { ...panel, quotaSources: original };
+    assert.equal(app.runtimeQuotaSources()[0].id, "devin");
+    assert.equal(app.runtimeQuotaSources()[1].id, "kimi");
+    assert.equal(app.runtimeQuotaSources()[0].available, available);
+    assert.equal(original[0].id, "kimi");
+    app.runtimeStatus = { ...panel, quotaSources: [failedOrReady, kimi] };
+    assert.equal(app.runtimeQuotaSources()[0].id, "devin");
+  }
+});

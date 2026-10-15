@@ -2066,7 +2066,9 @@ function memoryAdmin() {
     },
     runtimeQuotaSources() {
       if (!this.runtimeStatus) return [];
-      return this.runtimeStatus.quotaSources || [Object.assign({ id: 'kimi', label: 'Kimi', freshForSeconds: 120 }, this.runtimeStatus)];
+      const sources = this.runtimeStatus.quotaSources || [Object.assign({ id: 'kimi', label: 'Kimi', freshForSeconds: 120 }, this.runtimeStatus)];
+      // Presentation only: keep the response intact and retain Kimi as a fallback.
+      return sources.slice().sort((a, b) => Number(b.id === 'devin') - Number(a.id === 'devin'));
     },
     runtimeSourceStatus(source) {
       if (!source.available) return '读取失败';
