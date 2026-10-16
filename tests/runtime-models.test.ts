@@ -92,3 +92,27 @@ test("busy and smaller context never send a control request", async () => {
   assert.equal(calls, 0);
   assert.match(app.runtimeModelMessage, /上限/);
 });
+
+test("advertised counts and unconfigured models remain visible and are never selectable", () => {
+  const source = { id: "devin-local", label: "Devin", checkedAt: "2026-10-16T00:00:00Z", advertised: 3, configured: 2,
+    pending: [{ id: "vertex/gemini-4-argon", label: "vertex/gemini-4-argon", family: "Gemini", reason: "missing limits", api_key: "SECRET" }] };
+  const projected = projectModelControl({ ...control, catalogSources: [source] });
+  assert.equal(JSON.stringify(projected).includes("SECRET"), false);
+  assert.throws(() => projectModelControl({ ...control, catalogSources: [{ ...source, configured: 3 }] }));
+  const app = appFixture(async () => Response.json({}));
+  app.runtimeControl().catalogSources = [source];
+  assert.match(app.runtimeCatalogSummary(), /3 项，已配置 2，待配置 1/);
+  app.runtimeFamily = "Gemini";
+  assert.equal(app.runtimeFilteredModels().length, 0);
+  assert.equal(app.runtimePendingModels().length, 1);
+  app.runtimeSearch = "missing-name";
+  assert.equal(app.runtimePendingModels().length, 0);
+  assert.match(ADMIN_HTML, /aria-disabled="true"/);
+});
+
+test("model selected and field colors use both-theme variables, never a hardcoded dark fill", () => {
+  assert.match(ADMIN_HTML, /\.runtime-model-option\.is-selected\s*\{[^}]*color: var\(--text-1\);[^}]*background: var\(--hover-bg\)/);
+  assert.match(ADMIN_HTML, /\.runtime-model-field option\s*\{[^}]*color: var\(--text-1\)/);
+  assert.equal(ADMIN_HTML.includes('bg-[#20191a]'), false);
+  assert.match(ADMIN_HTML, /:aria-pressed="runtimeSelectedModel === model.id"/);
+});

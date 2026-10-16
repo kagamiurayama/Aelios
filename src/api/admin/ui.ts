@@ -205,6 +205,16 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
   }
   .runtime-progress { height: 8px; overflow: hidden; border-radius: 999px; background: var(--bg-deep); }
   .runtime-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--aurora); }
+  .runtime-model-option {
+    color: var(--text-1); background: var(--bg-deep); border-color: var(--panel-border);
+  }
+  .runtime-model-option.is-selected {
+    color: var(--text-1); background: var(--hover-bg); border-color: var(--violet);
+    box-shadow: 0 0 0 1px var(--violet) inset;
+  }
+  .runtime-model-field, .runtime-model-field option {
+    color: var(--text-1); background-color: var(--bg-deep);
+  }
 
   /* ===== 极光系小件：徽标 / 选中态 / 图表条 ===== */
   .aurora-text { background: var(--aurora); -webkit-background-clip: text; background-clip: text; color: transparent; }
@@ -641,8 +651,9 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
                   <button type="button" @click="runtimeProvider = provider.id; runtimeFamily = 'all'" class="choice-tab tap rounded-xl border px-3 text-xs" :class="runtimeProvider === provider.id ? 'is-active' : ''" x-text="provider.label"></button>
                 </template>
               </div>
+              <p x-show="runtimeCatalogSummary()" class="text-xs text-zinc-400" x-text="runtimeCatalogSummary()"></p>
               <div class="flex gap-2">
-                <select x-model="runtimeFamily" aria-label="模型系列" class="rounded-xl border border-zinc-700 bg-zinc-900 p-2 text-sm">
+                <select x-model="runtimeFamily" aria-label="模型系列" class="runtime-model-field rounded-xl border border-zinc-700 p-2 text-sm">
                   <option value="all">全部系列</option>
                   <template x-for="family in runtimeFamilies()" :key="family"><option :value="family" x-text="family"></option></template>
                 </select>
@@ -650,16 +661,22 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
               </div>
               <div class="max-h-72 overflow-y-auto space-y-2">
                 <template x-for="model in runtimeFilteredModels()" :key="model.id">
-                  <button type="button" @click="runtimeSelectModel(model)" :disabled="runtimeModelSaving" class="w-full rounded-xl border p-3 text-left text-sm" :class="runtimeSelectedModel === model.id ? 'border-coral bg-[#20191a]' : 'border-zinc-800 bg-[#0a0a0b]'">
+                  <button type="button" @click="runtimeSelectModel(model)" :disabled="runtimeModelSaving" :aria-pressed="runtimeSelectedModel === model.id" class="runtime-model-option w-full rounded-xl border p-3 text-left text-sm" :class="runtimeSelectedModel === model.id ? 'is-selected' : ''">
                     <span x-text="model.label"></span><span x-show="runtimeControl().currentModel === model.id" class="ml-2 text-xs text-coral">当前</span>
                     <div class="mt-1 text-xs text-zinc-400" x-text="model.family + ' · ' + Math.round(model.contextLimit / 1000) + 'k 目录上下文 · ' + (model.image ? '声明支持图片' : '文本')"></div>
                   </button>
                 </template>
-                <p x-show="!runtimeFilteredModels().length" class="text-xs text-zinc-400">没有匹配的模型。</p>
+                <template x-for="model in runtimePendingModels()" :key="model.provider + '/' + model.id">
+                  <div class="runtime-model-option rounded-xl border p-3 text-sm" aria-disabled="true">
+                    <span x-text="model.label"></span><span class="chip ml-2">待配置</span>
+                    <p class="mt-1 text-xs text-zinc-400" x-text="model.reason"></p>
+                  </div>
+                </template>
+                <p x-show="!runtimeFilteredModels().length && !runtimePendingModels().length" class="text-xs text-zinc-400">没有匹配的模型。</p>
               </div>
               <div class="flex flex-wrap items-center gap-2">
                 <label class="text-xs text-zinc-400" for="runtime-effort">思考档位</label>
-                <select id="runtime-effort" x-model="runtimeSelectedEffort" :disabled="runtimeModelSaving" class="rounded-xl border border-zinc-700 bg-zinc-900 p-2 text-sm">
+                <select id="runtime-effort" x-model="runtimeSelectedEffort" :disabled="runtimeModelSaving" class="runtime-model-field rounded-xl border border-zinc-700 p-2 text-sm">
                   <template x-for="effort in runtimeEfforts()" :key="effort"><option :value="effort" x-text="effort"></option></template>
                 </select>
                 <button type="button" @click="saveRuntimeModel()" :disabled="!runtimeCanSwitch()" class="tap rounded-xl bg-coral px-4 text-sm font-semibold text-zinc-950 disabled:opacity-40" x-text="runtimeModelSaving ? '正在核实切换…' : '切换到所选模型'"></button>
@@ -2132,7 +2149,18 @@ function memoryAdmin() {
     },
     runtimeFamilies() {
       const c = this.runtimeControl();
-      return c ? [...new Set(c.models.filter(m => this.runtimeProvider === 'all' || m.provider === this.runtimeProvider).map(m => m.family))] : [];
+      const pending = c ? (c.catalogSources || []).flatMap(s => s.pending.map(m => Object.assign({ provider: s.id }, m))) : [];
+      return c ? [...new Set(c.models.concat(pending).filter(m => this.runtimeProvider === 'all' || m.provider === this.runtimeProvider).map(m => m.family))] : [];
+    },
+    runtimeCatalogSummary() {
+      const c = this.runtimeControl();
+      const sources = c ? (c.catalogSources || []).filter(s => this.runtimeProvider === 'all' || s.id === this.runtimeProvider) : [];
+      return sources.map(s => s.label + '：上次同步 ' + s.advertised + ' 项，已配置 ' + s.configured + '，待配置 ' + s.pending.length).join('；');
+    },
+    runtimePendingModels() {
+      const c = this.runtimeControl();
+      const q = this.runtimeSearch.trim().toLowerCase();
+      return c ? (c.catalogSources || []).flatMap(s => s.pending.map(m => Object.assign({ provider: s.id }, m))).filter(m => (this.runtimeProvider === 'all' || m.provider === this.runtimeProvider) && (this.runtimeFamily === 'all' || m.family === this.runtimeFamily) && (!q || (m.label + ' ' + m.id).toLowerCase().includes(q))) : [];
     },
     runtimeFilteredModels() {
       const c = this.runtimeControl();

@@ -63,8 +63,22 @@ export function projectModelControl(raw: unknown): Record<string, unknown> {
   const current = models.find(m => m.id === raw.currentModel);
   if (!current || !current.efforts.includes(raw.currentEffort) ||
       (raw.usedTokens !== null && (!Number.isInteger(raw.usedTokens) || Number(raw.usedTokens) < 0))) throw new Error("runtime_status_contract_invalid");
+  const sources = raw.catalogSources ?? [];
+  if (!Array.isArray(sources) || sources.length > 2) throw new Error("runtime_status_contract_invalid");
+  const catalogSources = sources.map(source => {
+    if (!isObject(source) || !["devin-local", "devin-newapi"].includes(String(source.id)) ||
+        !Number.isInteger(source.advertised) || Number(source.advertised) < 0 || Number(source.advertised) > 200 ||
+        !Number.isInteger(source.configured) || Number(source.configured) < 0 ||
+        !Array.isArray(source.pending) || source.pending.length + Number(source.configured) !== source.advertised) throw new Error("runtime_status_contract_invalid");
+    return { id: source.id, label: printableText(source.label,120), checkedAt: optionalIso(source.checkedAt),
+      advertised: source.advertised, configured: source.configured,
+      pending: source.pending.map(row => {
+        if (!isObject(row)) throw new Error("runtime_status_contract_invalid");
+        return { id: printableText(row.id,160),label:printableText(row.label,160),family:printableText(row.family,40),reason:printableText(row.reason,120) };
+      }) };
+  });
   return { status: raw.status, revision: raw.revision, currentModel: raw.currentModel,
-    currentEffort: raw.currentEffort, usedTokens: raw.usedTokens, models };
+    currentEffort: raw.currentEffort, usedTokens: raw.usedTokens, models, catalogSources };
 }
 
 function runtimeStatusTarget(env: Env): URL {
