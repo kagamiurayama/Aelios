@@ -119,9 +119,10 @@ const runtimeSection = ADMIN_HTML.match(
   /<div x-show="moreView === 'runtime'"[\s\S]*?<div x-show="moreView === 'precious'"/
 );
 assert.ok(runtimeSection);
-assert.doesNotMatch(
-  runtimeSection[0],
-  /(modelOptions|thinkingOptions|selectModel|selectThinking|CONTROL_ENDPOINT|\/settings)/
-);
+// Quota remains read-only; the new, separately authenticated control endpoint
+// is deliberate and must not be confused with a quota refresh.
+assert.match(runtimeSection[0], /会话内模型切换/);
+assert.match(runtimeSection[0], /saveRuntimeModel/);
+assert.match(runtimeSection[0], /只读显示；不会切换模型，也不会修改当前会话。/);
 
 console.log("runtime status verification: ok");

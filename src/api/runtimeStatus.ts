@@ -38,6 +38,49 @@ function printableText(value: unknown, maxChars: number): string {
   return value;
 }
 
+export function projectModelControl(raw: unknown): Record<string, unknown> {
+  if (!isObject(raw) || !["ready", "busy", "unavailable"].includes(String(raw.status))) throw new Error("runtime_status_contract_invalid");
+  if (raw.status === "unavailable") return { status: "unavailable", models: [] };
+  if (!Array.isArray(raw.models) || raw.models.length > 200 ||
+      typeof raw.revision !== "string" || !/^[a-f0-9]{64}$/.test(raw.revision)) throw new Error("runtime_status_contract_invalid");
+  const seen = new Set<string>();
+  const allowedEfforts = new Set(["off", "on", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  const models = raw.models.map(row => {
+    if (!isObject(row)) throw new Error("runtime_status_contract_invalid");
+    const id = printableText(row.id, 160);
+    if (seen.has(id) || !/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/.test(id) ||
+        !Number.isInteger(row.contextLimit) || Number(row.contextLimit) < 1 ||
+        !Number.isInteger(row.inputLimit) || Number(row.inputLimit) < 1 ||
+        Number(row.inputLimit) > Number(row.contextLimit) || typeof row.image !== "boolean" ||
+        !Array.isArray(row.efforts) || row.efforts.length < 1 || row.efforts.length > 8 ||
+        row.efforts.some(e => !allowedEfforts.has(e)) || !row.efforts.includes(row.defaultEffort)) throw new Error("runtime_status_contract_invalid");
+    seen.add(id);
+    return { id, label: printableText(row.label, 100), provider: printableText(row.provider, 100),
+      providerLabel: printableText(row.providerLabel, 120), family: printableText(row.family, 40),
+      contextLimit: row.contextLimit, inputLimit: row.inputLimit, image: row.image,
+      efforts: row.efforts, defaultEffort: row.defaultEffort };
+  });
+  const current = models.find(m => m.id === raw.currentModel);
+  if (!current || !current.efforts.includes(raw.currentEffort) ||
+      (raw.usedTokens !== null && (!Number.isInteger(raw.usedTokens) || Number(raw.usedTokens) < 0))) throw new Error("runtime_status_contract_invalid");
+  const sources = raw.catalogSources ?? [];
+  if (!Array.isArray(sources) || sources.length > 2) throw new Error("runtime_status_contract_invalid");
+  const catalogSources = sources.map(source => {
+    if (!isObject(source) || !["devin-local", "devin-newapi"].includes(String(source.id)) ||
+        !Number.isInteger(source.advertised) || Number(source.advertised) < 0 || Number(source.advertised) > 200 ||
+        !Number.isInteger(source.configured) || Number(source.configured) < 0 ||
+        !Array.isArray(source.pending) || source.pending.length + Number(source.configured) !== source.advertised) throw new Error("runtime_status_contract_invalid");
+    return { id: source.id, label: printableText(source.label,120), checkedAt: optionalIso(source.checkedAt),
+      advertised: source.advertised, configured: source.configured,
+      pending: source.pending.map(row => {
+        if (!isObject(row)) throw new Error("runtime_status_contract_invalid");
+        return { id: printableText(row.id,160),label:printableText(row.label,160),family:printableText(row.family,40),reason:printableText(row.reason,120) };
+      }) };
+  });
+  return { status: raw.status, revision: raw.revision, currentModel: raw.currentModel,
+    currentEffort: raw.currentEffort, usedTokens: raw.usedTokens, models, catalogSources };
+}
+
 function runtimeStatusTarget(env: Env): URL {
   const raw = env.ERRALIA_RUNTIME_STATUS_URL?.trim() || "";
   let target: URL;
@@ -94,6 +137,59 @@ export function projectAshuoRuntimePanel(raw: unknown): Record<string, unknown> 
     };
   });
 
+  // Optional extension: old daemons still return only the Kimi v0 root.
+  // Explicitly project each source so tokens/account fields cannot cross here.
+  let quotaSources: Record<string, unknown>[] | undefined;
+  if (raw.quotaSources !== undefined) {
+    if (!Array.isArray(raw.quotaSources) || raw.quotaSources.length < 1 || raw.quotaSources.length > 2) {
+      throw new Error("runtime_status_contract_invalid");
+    }
+    const seen = new Set<string>();
+    quotaSources = raw.quotaSources.map((source) => {
+      if (!isObject(source) || (source.id !== "kimi" && source.id !== "devin") || seen.has(source.id)) {
+        throw new Error("runtime_status_contract_invalid");
+      }
+      seen.add(source.id);
+      if (typeof source.available !== "boolean" || typeof source.stale !== "boolean" ||
+          !Number.isInteger(source.freshForSeconds) || Number(source.freshForSeconds) < 1 ||
+          Number(source.freshForSeconds) > 3600 || !Array.isArray(source.windows) ||
+          source.windows.length > (source.id === "devin" ? 2 : 4)) {
+        throw new Error("runtime_status_contract_invalid");
+      }
+      const expectedMeaning = source.id === "devin" ? "remaining" : "used";
+      const windowIds = new Set<string>();
+      const sourceWindows = source.windows.map((item) => {
+        if (!isObject(item) || !isObject(item.percentage) ||
+            item.percentage.meaning !== expectedMeaning || typeof item.percentage.value !== "number" ||
+            !Number.isFinite(item.percentage.value) ||
+            item.percentage.value < (source.id === "devin" ? 0 : -1_000_000) ||
+            item.percentage.value > (source.id === "devin" ? 100 : 1_000_000)) {
+          throw new Error("runtime_status_contract_invalid");
+        }
+        const id = printableText(item.id, 64);
+        if (windowIds.has(id) || (source.id === "devin" && id !== "devin_daily" && id !== "devin_weekly")) {
+          throw new Error("runtime_status_contract_invalid");
+        }
+        windowIds.add(id);
+        return {
+          id, label: printableText(item.label, 80),
+          percentage: { meaning: expectedMeaning, value: item.percentage.value },
+          resetAt: optionalIso(item.resetAt)
+        };
+      });
+      if (source.available && (sourceWindows.length === 0 || (source.id === "devin" && sourceWindows.length !== 2))) {
+        throw new Error("runtime_status_contract_invalid");
+      }
+      return {
+        id: source.id, label: source.id === "devin" ? "Devin" : "Kimi",
+        available: source.available, stale: source.stale,
+        errorLabel: printableText(source.errorLabel, 120),
+        collectedAt: optionalIso(source.collectedAt), freshForSeconds: source.freshForSeconds,
+        windows: source.available ? sourceWindows : []
+      };
+    });
+  }
+
   return {
     schema: PANEL_SCHEMA,
     residentId: RESIDENT_ID,
@@ -101,14 +197,17 @@ export function projectAshuoRuntimePanel(raw: unknown): Record<string, unknown> 
     stale: raw.stale,
     errorLabel: printableText(raw.errorLabel, 120),
     collectedAt: optionalIso(raw.collectedAt),
-    windows
+    windows,
+    ...(quotaSources ? { quotaSources } : {}),
+    ...(raw.modelControl ? { modelControl: projectModelControl(raw.modelControl) } : {})
   };
 }
 
 export async function handleRuntimeStatus(
   request: Request,
   env: Env,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  settings = false
 ): Promise<Response> {
   let target: URL;
   try {
@@ -116,6 +215,7 @@ export async function handleRuntimeStatus(
   } catch {
     return jsonResponse(503, { ok: false, error: "runtime_status_not_configured" });
   }
+  if (settings) target.pathname = "/api/v1/miniapp/ashuo/settings";
 
   let body: unknown;
   try {
@@ -127,16 +227,21 @@ export async function handleRuntimeStatus(
   }
   if (
     !isObject(body) ||
-    Object.keys(body).length !== 1 ||
+    (settings ? Object.keys(body).sort().join(",") !== "effort,initData,model,revision" : Object.keys(body).length !== 1) ||
     typeof body.initData !== "string" ||
     body.initData.length < 1 ||
     body.initData.length > MAX_INIT_DATA_CHARS
   ) {
     return jsonResponse(400, { ok: false, error: "runtime_status_request_invalid" });
   }
+  if (settings && (typeof body.revision !== "string" || !/^[a-f0-9]{64}$/.test(body.revision) ||
+      typeof body.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}$/.test(body.model) ||
+      !["off", "on", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(body.effort)))) {
+    return jsonResponse(400, { ok: false, error: "runtime_status_request_invalid" });
+  }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
+  const timeout = setTimeout(() => controller.abort(), settings ? 35_000 : 10_000);
   try {
     const upstream = await fetchImpl(target, {
       method: "POST",
@@ -144,7 +249,7 @@ export async function handleRuntimeStatus(
         "content-type": "application/json",
         "user-agent": "Aelios-Runtime-Status/1.0"
       },
-      body: JSON.stringify({ initData: body.initData }),
+      body: JSON.stringify(settings ? body : { initData: body.initData }),
       // Cloudflare Workers does not implement redirect="error". Keep the
       // boundary fail-closed by receiving redirects manually and rejecting
       // them before reading or projecting any upstream response.
@@ -163,6 +268,12 @@ export async function handleRuntimeStatus(
       return jsonResponse(502, { ok: false, error: "runtime_status_upstream_invalid" });
     }
     if (!upstream.ok) {
+      if (settings && [400, 409, 503, 504].includes(upstream.status)) {
+        let code: unknown;
+        try { code = JSON.parse(text).error; } catch { code = null; }
+        const allowed = ["miniapp_control_busy", "miniapp_control_stale", "miniapp_control_context_too_large", "miniapp_control_choice_invalid", "miniapp_control_not_confirmed", "miniapp_control_unavailable", "miniapp_control_unverified", "miniapp_control_identity_changed", "miniapp_control_label_ambiguous"];
+        return jsonResponse(upstream.status, { ok: false, error: allowed.includes(String(code)) ? code : "miniapp_control_not_confirmed" });
+      }
       const status = upstream.status === 401 || upstream.status === 403 ? 401 : 502;
       return jsonResponse(status, {
         ok: false,
@@ -176,6 +287,10 @@ export async function handleRuntimeStatus(
       return jsonResponse(502, { ok: false, error: "runtime_status_upstream_invalid" });
     }
     try {
+      if (settings) {
+        if (!isObject(raw)) throw new Error("invalid");
+        return jsonResponse(200, { ok: true, data: { modelControl: projectModelControl(raw.modelControl) } });
+      }
       return jsonResponse(200, { ok: true, data: projectAshuoRuntimePanel(raw) });
     } catch {
       return jsonResponse(502, { ok: false, error: "runtime_status_upstream_invalid" });

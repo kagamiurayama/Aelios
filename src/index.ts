@@ -124,6 +124,9 @@ export default {
     if (request.method === "POST" && url.pathname === "/admin/runtime-status") {
       return handleRuntimeStatus(request, env);
     }
+    if (request.method === "POST" && url.pathname === "/admin/runtime-settings") {
+      return handleRuntimeStatus(request, env, fetch, true);
+    }
 
     if (request.method === "GET" && url.pathname === "/admin/starmap") {
       return handleStarmap();

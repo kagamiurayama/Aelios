@@ -205,6 +205,16 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
   }
   .runtime-progress { height: 8px; overflow: hidden; border-radius: 999px; background: var(--bg-deep); }
   .runtime-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--aurora); }
+  .runtime-model-option {
+    color: var(--text-1); background: var(--bg-deep); border-color: var(--panel-border);
+  }
+  .runtime-model-option.is-selected {
+    color: var(--text-1); background: var(--hover-bg); border-color: var(--violet);
+    box-shadow: 0 0 0 1px var(--violet) inset;
+  }
+  .runtime-model-field, .runtime-model-field option {
+    color: var(--text-1); background-color: var(--bg-deep);
+  }
 
   /* ===== 极光系小件：徽标 / 选中态 / 图表条 ===== */
   .aurora-text { background: var(--aurora); -webkit-background-clip: text; background-clip: text; color: transparent; }
@@ -625,12 +635,62 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
         </div>
 
         <div x-show="moreView === 'runtime'" class="space-y-3">
+          <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm space-y-3">
+            <div class="flex items-center justify-between gap-3">
+              <h2 class="font-semibold">会话内模型切换</h2>
+              <button type="button" @click="loadRuntimeStatus()" :disabled="runtimeStatusLoading || runtimeModelSaving" class="tap rounded-xl border border-zinc-700 px-3 text-xs disabled:opacity-40">刷新状态</button>
+            </div>
+            <p class="text-xs text-zinc-400">保留当前会话，不重启、不主动压缩。首次选新增模型会在原窗口刷新配置；生成回复时暂不可切，跨模型会重新建立缓存。</p>
+            <div class="rounded-2xl bg-[#0a0a0b] p-3 text-sm">
+              <span x-text="runtimeCurrentLabel()"></span>
+              <span class="chip ml-2" x-text="runtimeControlLabel()"></span>
+            </div>
+            <div x-show="runtimeControl() && runtimeControl().models.length" class="space-y-3">
+              <div class="flex flex-wrap gap-2">
+                <template x-for="provider in runtimeProviders()" :key="provider.id">
+                  <button type="button" @click="runtimeProvider = provider.id; runtimeFamily = 'all'" class="choice-tab tap rounded-xl border px-3 text-xs" :class="runtimeProvider === provider.id ? 'is-active' : ''" x-text="provider.label"></button>
+                </template>
+              </div>
+              <p x-show="runtimeCatalogSummary()" class="text-xs text-zinc-400" x-text="runtimeCatalogSummary()"></p>
+              <div class="flex gap-2">
+                <select x-model="runtimeFamily" aria-label="模型系列" class="runtime-model-field rounded-xl border border-zinc-700 p-2 text-sm">
+                  <option value="all">全部系列</option>
+                  <template x-for="family in runtimeFamilies()" :key="family"><option :value="family" x-text="family"></option></template>
+                </select>
+                <input x-model="runtimeSearch" aria-label="搜索模型" placeholder="搜索名称或型号" class="min-w-0 flex-1 rounded-xl border border-zinc-700 bg-[#0a0a0b] px-3 text-sm">
+              </div>
+              <div class="max-h-72 overflow-y-auto space-y-2">
+                <template x-for="model in runtimeFilteredModels()" :key="model.id">
+                  <button type="button" @click="runtimeSelectModel(model)" :disabled="runtimeModelSaving" :aria-pressed="runtimeSelectedModel === model.id" class="runtime-model-option w-full rounded-xl border p-3 text-left text-sm" :class="runtimeSelectedModel === model.id ? 'is-selected' : ''">
+                    <span x-text="model.label"></span><span x-show="runtimeControl().currentModel === model.id" class="ml-2 text-xs text-coral">当前</span>
+                    <div class="mt-1 text-xs text-zinc-400" x-text="model.family + ' · ' + Math.round(model.contextLimit / 1000) + 'k 目录上下文 · ' + (model.image ? '声明支持图片' : '文本')"></div>
+                  </button>
+                </template>
+                <template x-for="model in runtimePendingModels()" :key="model.provider + '/' + model.id">
+                  <div class="runtime-model-option rounded-xl border p-3 text-sm" aria-disabled="true">
+                    <span x-text="model.label"></span><span class="chip ml-2">待配置</span>
+                    <p class="mt-1 text-xs text-zinc-400" x-text="model.reason"></p>
+                  </div>
+                </template>
+                <p x-show="!runtimeFilteredModels().length && !runtimePendingModels().length" class="text-xs text-zinc-400">没有匹配的模型。</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <label class="text-xs text-zinc-400" for="runtime-effort">思考档位</label>
+                <select id="runtime-effort" x-model="runtimeSelectedEffort" :disabled="runtimeModelSaving" class="runtime-model-field rounded-xl border border-zinc-700 p-2 text-sm">
+                  <template x-for="effort in runtimeEfforts()" :key="effort"><option :value="effort" x-text="effort"></option></template>
+                </select>
+                <button type="button" @click="saveRuntimeModel()" :disabled="!runtimeCanSwitch()" class="tap rounded-xl bg-coral px-4 text-sm font-semibold text-zinc-950 disabled:opacity-40" x-text="runtimeModelSaving ? '正在核实切换…' : '切换到所选模型'"></button>
+              </div>
+              <p class="text-xs text-zinc-400">目录能力不代表逐个模型已实测。模型会保存为默认值；档位显示当前会话实际值，重启后的档位由 Kimi 默认设置决定。</p>
+            </div>
+            <p x-show="runtimeModelMessage" class="text-sm text-coral" role="status" x-text="runtimeModelMessage"></p>
+          </article>
           <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
             <div class="flex items-start justify-between gap-3">
               <div>
                 <div class="flex items-center gap-2">
                   <i data-lucide="gauge" class="h-4 w-4 text-coral"></i>
-                  <h2 class="font-semibold">Kimi 额度</h2>
+                  <h2 class="font-semibold">模型额度</h2>
                 </div>
                 <p class="mt-1 text-xs text-zinc-400">只读显示；不会切换模型，也不会修改当前会话。</p>
               </div>
@@ -643,24 +703,29 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
             <div x-show="runtimeStatusError && !runtimeStatusLoading" class="mt-4 rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-coral" x-text="runtimeStatusError"></div>
 
             <div x-show="runtimeStatus && !runtimeStatusLoading" class="mt-4 space-y-3">
-              <div class="flex flex-wrap items-center gap-2 text-xs">
-                <span class="chip" :class="runtimeStatus && runtimeStatus.stale ? 'chip-warn' : 'chip-ok'" x-text="runtimeStatus && runtimeStatus.stale ? '数据可能陈旧' : '数据新鲜'"></span>
-                <span class="text-zinc-400" x-text="runtimeCollectedLabel()"></span>
-              </div>
-              <template x-if="runtimeStatus && runtimeStatus.windows.length === 0">
-                <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-zinc-400" x-text="runtimeStatus.errorLabel || 'Kimi 暂未返回额度窗口'"></div>
-              </template>
-              <template x-for="item in (runtimeStatus ? runtimeStatus.windows : [])" :key="item.id">
+              <template x-for="source in runtimeQuotaSources()" :key="source.id">
+                <section class="space-y-3 pt-2">
+                  <div class="flex flex-wrap items-center gap-2 text-xs">
+                    <h3 class="text-sm font-semibold" x-text="source.label"></h3>
+                    <span class="chip" :class="runtimeSourceStatus(source) === '数据新鲜' ? 'chip-ok' : 'chip-warn'" x-text="runtimeSourceStatus(source)"></span>
+                    <span class="text-zinc-400" x-text="runtimeCollectedLabel(source)"></span>
+                  </div>
+                  <template x-if="!source.available || source.windows.length === 0">
+                    <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm text-zinc-400" x-text="source.errorLabel || '额度暂不可用'"></div>
+                  </template>
+                  <template x-for="item in (source.available ? source.windows : [])" :key="item.id">
                 <div class="rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4">
                   <div class="flex items-baseline justify-between gap-3">
                     <div class="font-semibold" x-text="item.label"></div>
-                    <div class="text-xl font-semibold aurora-text" x-text="runtimePercentLabel(item)"></div>
+                    <div class="text-xl font-semibold aurora-text" x-text="(item.percentage.meaning === 'remaining' ? '剩余 ' : '已用 ') + runtimePercentLabel(item)"></div>
                   </div>
-                  <div class="runtime-progress mt-3" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="runtimeVisualPercent(item)">
+                  <div class="runtime-progress mt-3" role="progressbar" :aria-label="source.label + ' ' + item.label + (item.percentage.meaning === 'remaining' ? ' 剩余' : ' 已用')" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="runtimeVisualPercent(item)">
                     <span :style="'width:' + runtimeVisualPercent(item) + '%'"></span>
                   </div>
                   <div class="mt-2 text-xs text-zinc-400" x-text="runtimeResetLabel(item)"></div>
                 </div>
+                  </template>
+                </section>
               </template>
             </div>
           </article>
@@ -1461,12 +1526,24 @@ function memoryAdmin() {
     runtimeStatus: null,
     runtimeStatusLoading: false,
     runtimeStatusError: '',
+    runtimeProvider: 'devin-local',
+    runtimeFamily: 'all',
+    runtimeSearch: '',
+    runtimeSelectedModel: '',
+    runtimeSelectedEffort: '',
+    runtimeModelSaving: false,
+    runtimeModelMessage: '',
+    runtimeNow: Date.now(),
+    runtimeClock: null,
 
     async init() {
       this.applyTheme();
       this.icons();
       await this.loadMemoryIdentities();
       await this.reloadAll();
+    },
+    destroy() {
+      if (this.runtimeClock) clearInterval(this.runtimeClock);
     },
     currentIdentity() {
       return this.memoryIdentities.find(idn => idn.slug === this.selectedIdentity);
@@ -2016,7 +2093,7 @@ function memoryAdmin() {
       return hash.get('tgWebAppData') || query.get('tgWebAppData') || '';
     },
     async loadRuntimeStatus() {
-      if (this.runtimeStatusLoading) return;
+      if (this.runtimeStatusLoading || this.runtimeModelSaving) return;
       const initData = this.telegramInitData();
       if (!initData) {
         this.runtimeStatus = null;
@@ -2038,19 +2115,114 @@ function memoryAdmin() {
           const code = payload && payload.error;
           if (code === 'telegram_auth_failed') throw new Error('Telegram 身份已过期，请关闭后从阿朔私聊重新打开。');
           if (code === 'runtime_status_not_configured') throw new Error('运行状态尚未接通。');
-          throw new Error('Kimi 额度暂时读取失败，请稍后重试。');
+          throw new Error('额度暂时读取失败，请稍后重试。');
         }
         this.runtimeStatus = payload.data;
+        const control = this.runtimeControl();
+        if (control && control.currentModel) {
+          this.runtimeSelectedModel = control.currentModel;
+          this.runtimeSelectedEffort = control.currentEffort;
+        }
+        this.runtimeNow = Date.now();
+        if (!this.runtimeClock) this.runtimeClock = setInterval(() => { this.runtimeNow = Date.now(); }, 30000);
       } catch (error) {
         this.runtimeStatus = null;
-        this.runtimeStatusError = error && error.message ? error.message : 'Kimi 额度暂时读取失败，请稍后重试。';
+        this.runtimeStatusError = error && error.message ? error.message : '额度暂时读取失败，请稍后重试。';
       }
       this.runtimeStatusLoading = false;
       this.icons();
     },
+    runtimeControl() { return this.runtimeStatus && this.runtimeStatus.modelControl; },
+    runtimeCurrentLabel() {
+      const c = this.runtimeControl();
+      const m = c && c.models.find(m => m.id === c.currentModel);
+      return m ? '当前：' + m.label + ' · ' + c.currentEffort : '当前模型待确认';
+    },
+    runtimeControlLabel() {
+      const c = this.runtimeControl();
+      return this.runtimeModelSaving ? '切换中' : c && c.status === 'ready' ? '空闲，可切换' : c && c.status === 'busy' ? '忙碌或终端未就绪，稍后刷新' : '暂不可切换';
+    },
+    runtimeProviders() {
+      const c = this.runtimeControl();
+      const rows = c ? c.models : [];
+      return [{ id: 'all', label: '全部来源' }].concat(rows.filter((m, i) => rows.findIndex(x => x.provider === m.provider) === i).map(m => ({ id: m.provider, label: m.providerLabel })));
+    },
+    runtimeFamilies() {
+      const c = this.runtimeControl();
+      const pending = c ? (c.catalogSources || []).flatMap(s => s.pending.map(m => Object.assign({ provider: s.id }, m))) : [];
+      return c ? [...new Set(c.models.concat(pending).filter(m => this.runtimeProvider === 'all' || m.provider === this.runtimeProvider).map(m => m.family))] : [];
+    },
+    runtimeCatalogSummary() {
+      const c = this.runtimeControl();
+      const sources = c ? (c.catalogSources || []).filter(s => this.runtimeProvider === 'all' || s.id === this.runtimeProvider) : [];
+      return sources.map(s => s.label + '：上次同步 ' + s.advertised + ' 项，已配置 ' + s.configured + '，待配置 ' + s.pending.length).join('；');
+    },
+    runtimePendingModels() {
+      const c = this.runtimeControl();
+      const q = this.runtimeSearch.trim().toLowerCase();
+      return c ? (c.catalogSources || []).flatMap(s => s.pending.map(m => Object.assign({ provider: s.id }, m))).filter(m => (this.runtimeProvider === 'all' || m.provider === this.runtimeProvider) && (this.runtimeFamily === 'all' || m.family === this.runtimeFamily) && (!q || (m.label + ' ' + m.id).toLowerCase().includes(q))) : [];
+    },
+    runtimeFilteredModels() {
+      const c = this.runtimeControl();
+      const q = this.runtimeSearch.trim().toLowerCase();
+      return c ? c.models.filter(m => (this.runtimeProvider === 'all' || m.provider === this.runtimeProvider) && (this.runtimeFamily === 'all' || m.family === this.runtimeFamily) && (!q || (m.label + ' ' + m.id).toLowerCase().includes(q))) : [];
+    },
+    runtimeSelectModel(model) {
+      this.runtimeSelectedModel = model.id;
+      const c = this.runtimeControl();
+      this.runtimeSelectedEffort = model.id === c.currentModel ? c.currentEffort : model.efforts.includes(c.currentEffort) ? c.currentEffort : model.defaultEffort;
+      this.runtimeModelMessage = '';
+    },
+    runtimeEfforts() {
+      const c = this.runtimeControl();
+      const m = c && c.models.find(m => m.id === this.runtimeSelectedModel);
+      return m ? m.efforts : [];
+    },
+    runtimeCanSwitch() {
+      const c = this.runtimeControl();
+      return Boolean(c && c.status === 'ready' && !this.runtimeModelSaving && !this.runtimeStatusLoading && this.runtimeEfforts().includes(this.runtimeSelectedEffort) && (c.currentModel !== this.runtimeSelectedModel || c.currentEffort !== this.runtimeSelectedEffort));
+    },
+    async saveRuntimeModel() {
+      if (!this.runtimeCanSwitch()) return;
+      const c = this.runtimeControl();
+      const m = c.models.find(m => m.id === this.runtimeSelectedModel);
+      if (c.usedTokens === null || c.usedTokens >= m.inputLimit) {
+        this.runtimeModelMessage = '当前上下文超过所选模型的输入上限，请先自行决定是否压缩或换窗。'; return;
+      }
+      this.runtimeModelSaving = true;
+      this.runtimeModelMessage = '';
+      try {
+        const response = await fetch('/admin/runtime-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ initData: this.telegramInitData(), revision: c.revision, model: m.id, effort: this.runtimeSelectedEffort }) });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok || !payload.data || !payload.data.modelControl) {
+          const messages = { miniapp_control_busy: '阿朔正在忙，请等这一轮结束后刷新。', miniapp_control_stale: '模型状态已改变，请刷新后再选。', miniapp_control_context_too_large: '当前上下文容不下；没有压缩或换窗。', telegram_auth_failed: 'Telegram 身份过期，请关闭后从私聊重新打开。' };
+          throw new Error(messages[payload.error] || '切换结果未确认，请刷新核对；不要连续重试。');
+        }
+        const result = payload.data.modelControl;
+        this.runtimeStatus.modelControl = result;
+        this.runtimeSelectedModel = result.currentModel;
+        this.runtimeSelectedEffort = result.currentEffort;
+        this.runtimeModelMessage = '已确认切换，仍在同一个会话中。';
+      } catch (error) {
+        if (this.runtimeStatus && this.runtimeStatus.modelControl) this.runtimeStatus.modelControl.status = 'unavailable';
+        this.runtimeModelMessage = error && error.message ? error.message : '结果未确认，请刷新核对。';
+      } finally { this.runtimeModelSaving = false; }
+    },
     runtimePercentLabel(item) {
       const value = item && item.percentage ? Number(item.percentage.value) : NaN;
       return Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 1 }) + '%' : '—';
+    },
+    runtimeQuotaSources() {
+      if (!this.runtimeStatus) return [];
+      const sources = this.runtimeStatus.quotaSources || [Object.assign({ id: 'kimi', label: 'Kimi', freshForSeconds: 120 }, this.runtimeStatus)];
+      // Presentation only: keep the response intact and retain Kimi as a fallback.
+      return sources.slice().sort((a, b) => Number(b.id === 'devin') - Number(a.id === 'devin'));
+    },
+    runtimeSourceStatus(source) {
+      if (!source.available) return '读取失败';
+      const collected = Date.parse(source.collectedAt || '');
+      const age = this.runtimeNow - collected;
+      return source.stale || !Number.isFinite(collected) || age < -30000 || age > source.freshForSeconds * 1000 ? '数据可能陈旧' : '数据新鲜';
     },
     runtimeVisualPercent(item) {
       const value = item && item.percentage ? Number(item.percentage.value) : 0;
@@ -2060,16 +2232,16 @@ function memoryAdmin() {
       if (!item || !item.resetAt) return '下次重置：未知';
       const reset = new Date(item.resetAt);
       if (!Number.isFinite(reset.getTime())) return '下次重置：未知';
-      const remaining = Math.max(0, reset.getTime() - Date.now());
+      const remaining = Math.max(0, reset.getTime() - this.runtimeNow);
       const minutes = Math.floor(remaining / 60000);
       const days = Math.floor(minutes / 1440);
       const hours = Math.floor((minutes % 1440) / 60);
       const mins = minutes % 60;
-      return '下次重置：' + (days ? days + ' 天 ' : '') + (hours ? hours + ' 小时 ' : '') + mins + ' 分钟';
+      return '重置：' + reset.toLocaleString('zh-CN', { hour12: false }) + '（' + (days ? days + ' 天 ' : '') + (hours ? hours + ' 小时 ' : '') + mins + ' 分钟）';
     },
-    runtimeCollectedLabel() {
-      if (!this.runtimeStatus || !this.runtimeStatus.collectedAt) return '采集时间未知';
-      const collected = new Date(this.runtimeStatus.collectedAt);
+    runtimeCollectedLabel(source) {
+      if (!source || !source.collectedAt) return '采集时间未知';
+      const collected = new Date(source.collectedAt);
       return Number.isFinite(collected.getTime()) ? '采集于 ' + collected.toLocaleString('zh-CN', { hour12: false }) : '采集时间未知';
     },
     async loadWorldFacts() {
