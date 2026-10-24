@@ -40,7 +40,7 @@ test("invalid source identity, remaining range, duplicates and incomplete quotas
     { ...devin, id: "other" }, { ...devin, freshForSeconds: true },
     { ...devin, windows: devin.windows.slice(0, 1) },
     { ...devin, windows: [devin.windows[0], devin.windows[0]] },
-    ...[true, null, 101, -1, NaN, "99"].map(value => ({ ...devin, windows: [
+    ...[true, null, 101, -1, Number.NaN, "99"].map(value => ({ ...devin, windows: [
       { ...devin.windows[0], percentage: { meaning: "remaining", value } }, devin.windows[1]
     ] })),
     { ...devin, windows: [{ ...devin.windows[0], percentage: { meaning: "used", value: 0 } }, devin.windows[1]] }
